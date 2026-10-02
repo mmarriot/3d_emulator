@@ -1,0 +1,540 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Truth Graph Levels</title>
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
+<style>
+:root {
+  --bg: #fafaf9; --panel: #ffffff; --ink: #1c1917; --muted: #78716c; --line: #e7e5e4;
+  --accent: #2563eb; --unowned: #d6d3d1; --edge: #a8a29e;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0c0a09; --panel: #1c1917; --ink: #f5f5f4; --muted: #a8a29e; --line: #292524;
+    --accent: #60a5fa; --unowned: #44403c; --edge: #57534e;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { padding: 16px; border-bottom: 1px solid var(--line); }
+h1 { margin: 0 0 4px; font-size: 18px; }
+header p { margin: 0; color: var(--muted); max-width: 75em; }
+.controls { display: flex; flex-wrap: wrap; gap: 12px 20px; padding: 12px 16px; align-items: end;
+  border-bottom: 1px solid var(--line); }
+.controls label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+select, input[type=number] { font: inherit; color: var(--ink); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; max-width: 100%; }
+.chk { flex-direction: row !important; align-items: center; gap: 6px !important; }
+#levelHelp { padding: 10px 16px; color: var(--muted); border-bottom: 1px solid var(--line); min-height: 1em; }
+main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr); gap: 12px; padding: 12px 16px; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+.panel h2 { margin: 0; padding: 8px 12px; font-size: 13px; border-bottom: 1px solid var(--line); }
+#graphWrap { overflow: auto; height: 620px; }
+#plot3d { height: 620px; }
+.wide { grid-column: 1 / -1; overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { padding: 4px 10px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+#tip { position: fixed; pointer-events: none; background: var(--panel); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 8px; font-size: 12px; display: none; max-width: 340px; z-index: 10;
+  box-shadow: 0 2px 8px rgba(0,0,0,.15); }
+svg text { fill: var(--ink); font-size: 10px; }
+.note { padding: 8px 12px; color: var(--muted); }
+#selInfo { padding: 8px 12px; }
+#selInfo .big { font-size: 15px; font-variant-numeric: tabular-nums; margin: 4px 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+.chip { border: 1px solid var(--line); border-radius: 12px; padding: 1px 8px; font-size: 12px; cursor: pointer; }
+button { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  padding: 2px 10px; cursor: pointer; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Truth graph levels: single π⁺, 0 and 200 PU</h1>
+  <p>Pick a truth level. Each particle in that set becomes one truth object with its own colour, and every
+  calorimeter sim hit is credited to the nearest member above the particle that made it. Show sim hits, layer clusters
+  or tracksters: a reco object takes the colour of the truth object that gave it most sim energy. Click nodes in the
+  particle graph to select them (again to deselect); the display then keeps only what the selection touches, and the
+  Selection panel adds up its energy and which reco objects capture it.</p>
+</header>
+<div class="controls">
+  <label>Event <select id="event"></select></label>
+  <label>Truth level <select id="level"></select></label>
+  <label id="depthBox">Generation <input type="number" id="depth" min="0" value="1" style="width:5em"></label>
+  <label>Show <select id="show">
+    <option value="hits">sim hits</option>
+    <option value="lc">layer clusters</option>
+    <option value="ts">tracksters</option>
+  </select></label>
+  <label id="tsBox">Trackster collection <select id="tsSet"></select></label>
+  <label id="colorBox">Colour reco by <select id="colorBy">
+    <option value="truth">dominant truth object</option>
+    <option value="reco">trackster</option>
+  </select></label>
+  <label>Hide subtrees below (% of signal calo E) <input type="number" id="minFrac" min="0" step="0.1" value="0.5" style="width:6em"></label>
+  <label class="chk"><input type="checkbox" id="showTracks" checked> trajectories</label>
+  <label class="chk"><input type="checkbox" id="showDet" checked> HGCal outline</label>
+  <label class="chk"><input type="checkbox" id="otherCalo"> ECAL/HCAL barrel hits</label>
+  <label>View <select id="view">
+    <option value="beam">beam view (x–y, from the IP)</option>
+    <option value="side">side view (ρ–z)</option>
+    <option value="3d">3D (needs WebGL)</option>
+  </select></label>
+</div>
+<div id="levelHelp"></div>
+<main>
+  <section class="panel"><h2>Particle graph</h2><div id="graphWrap"><svg id="graph"></svg></div></section>
+  <section class="panel"><h2 id="plotTitle">Calorimeter</h2><div id="plot3d"></div></section>
+  <section class="panel wide"><h2>Selection <button id="clearSel" style="margin-left:8px">clear</button></h2><div id="selInfo"></div></section>
+  <section class="panel wide" id="recoWrap"><h2 id="recoTitle">Reco objects</h2><div class="note" id="recoNote"></div><table id="recoTable"></table></section>
+  <section class="panel wide"><h2>Truth objects at this level</h2><div class="note" id="summary"></div><table id="table"></table></section>
+</main>
+<div id="tip"></div>
+<script>
+const PALETTE = ["#2563eb","#dc2626","#16a34a","#d97706","#9333ea","#0891b2","#db2777","#65a30d",
+                 "#ea580c","#4f46e5","#0d9488","#b45309"];
+const OTHER = "#78716c";
+const MIX_WARN = "Sim energy is what the active material records: nearly all of it in the ECAL barrel crystals, " +
+  "only the silicon/scintillator sampling fraction in HGCal. Percentages that add the two are not energy shares.";
+const PDG = {211:"π⁺",[-211]:"π⁻",111:"π⁰",22:"γ",11:"e⁻",[-11]:"e⁺",13:"μ⁻",[-13]:"μ⁺",2112:"n",[-2112]:"n̄",
+  2212:"p",[-2212]:"p̄",321:"K⁺",[-321]:"K⁻",130:"K⁰L",310:"K⁰S",3122:"Λ",[-3122]:"Λ̄",12:"ν",14:"ν",16:"ν",
+  [-12]:"ν̄",[-14]:"ν̄",[-16]:"ν̄",1000010020:"d",1000010030:"t",1000020040:"α"};
+const pname = id => PDG[id] ?? (Math.abs(id) > 1000000000 ? "nucl" : String(id));
+const LEVEL_HELP = {
+  root: "Each root and everything it produced as ONE object: what a CaloParticle is today.",
+  generation: "Cut the tree at a fixed generation below the root: each particle at that depth (or a leaf above it) owns its subtree.",
+  finest: "Every saved particle owns only the hits it made itself: the finest granularity the simulation stored.",
+  interaction: "One object per proton-proton interaction: the signal, and each in-time pileup collision. Out-of-time pileup has no truth graph.",
+  caloBoundary: "Particles recorded crossing INTO the calorimeter (not back-scattered): what actually arrived at the calorimeter.",
+  stableDecayProducts: "Generator-stable particles (status 1).",
+  reconstructableFinalState: "First reconstructable products walking down from each GEN root; a π⁰ counts as one object.",
+  reconstructableFromSignal: "Same walk, seeded from the signal (here the gun species).",
+};
+const MAX_PU_ROWS = 40;
+const $ = id => document.getElementById(id);
+const tip = $("tip");
+let manifest, ev, G;
+const selected = new Set();
+
+function cssVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim(); }
+
+async function init() {
+  manifest = await (await fetch("data/index.json")).json();
+  $("event").onchange = loadEvent;
+  $("level").onchange = render;
+  $("clearSel").onclick = () => { selected.clear(); render(); };
+  for (const id of ["depth", "minFrac", "showTracks", "showDet", "view", "show", "tsSet", "colorBy"]) $(id).onchange = render;
+  $("otherCalo").onchange = () => { build(); render(); };
+  const sel = $("event");
+  const groups = [...new Set(manifest.map(f => f.group ?? ""))];
+  for (const g of groups) {
+    const og = document.createElement("optgroup"); og.label = g || "events";
+    for (const f of manifest.filter(f => (f.group ?? "") === g)) og.appendChild(new Option(f.label, f.file));
+    sel.appendChild(og);
+  }
+  await loadEvent();
+}
+
+async function loadEvent() {
+  ev = await (await fetch("data/" + $("event").value)).json();
+  ev.layerClusters ??= []; ev.trackstersets ??= [];
+  build();
+  const lv = $("level"), prev = lv.value; lv.innerHTML = "";
+  lv.add(new Option("root (CaloParticle-like)", "root"));
+  if (G.hasPU) lv.add(new Option(`interaction: signal vs pileup (${G.groups.size})`, "interaction"));
+  lv.add(new Option("cut at generation N", "generation"));
+  for (const l of ev.levels) {
+    const n = ev.particles.filter(p => p.levels & l.bit).length;
+    if (n) lv.add(new Option(`${l.name} (${n})`, l.name));
+  }
+  lv.add(new Option("finest (every saved particle)", "finest"));
+  lv.value = [...lv.options].some(o => o.value === prev) ? prev : "caloBoundary";
+  if (!lv.value) lv.value = "root";
+  const ts = $("tsSet"), prevTs = ts.value; ts.innerHTML = "";
+  ev.trackstersets.forEach((s, i) => ts.add(new Option(`${s.name} (${s.tracksters.length})`, i)));
+  if ([...ts.options].some(o => o.value === prevTs)) ts.value = prevTs;
+  $("show").querySelector('[value=lc]').disabled = !ev.layerClusters.length;
+  $("show").querySelector('[value=ts]').disabled = !ev.trackstersets.length;
+  if ($("show").selectedOptions[0].disabled) $("show").value = "hits";
+  selected.clear();
+  render();
+}
+
+// Energy bookkeeping follows the displayed detectors: HGCal (DetId::Detector 8/9/10 = EE/HSi/HSc)
+// always, ECAL/HCAL only when that box is ticked.
+function shownCell(c) { return ev.cells[c][3] >= 8 || $("otherCalo").checked; }
+
+// Graph structure: parents via shared vertices; each particle gets one primary parent
+// (the first) so ownership and layout are a tree even where GEN is a DAG.
+function build() {
+  const P = ev.particles, n = P.length;
+  const vin = new Map();
+  P.forEach(p => p.dec.forEach(v => { if (!vin.has(v)) vin.set(v, []); vin.get(v).push(p.id); }));
+  const parent = new Int32Array(n).fill(-1), children = Array.from({length: n}, () => []);
+  P.forEach(p => {
+    for (const v of p.prod) { const ins = vin.get(v); if (ins && ins.length) { parent[p.id] = ins[0]; break; } }
+    if (parent[p.id] >= 0) children[parent[p.id]].push(p.id);
+  });
+  const direct = P.map(p => p.hits.reduce((s, h) => s + (shownCell(h[0]) ? h[1] : 0), 0));
+  const roots = P.filter(p => parent[p.id] < 0).map(p => p.id);
+  const depth = new Int32Array(n), order = [], sub = new Float64Array(n);
+  const stack = roots.map(r => [r, 0]);
+  while (stack.length) { const [u, d] = stack.pop(); depth[u] = d; order.push(u);
+    for (const c of children[u]) stack.push([c, d + 1]); }
+  for (let i = order.length - 1; i >= 0; --i) { const u = order[i];
+    sub[u] += direct[u]; if (parent[u] >= 0) sub[parent[u]] += sub[u]; }
+  // Interaction ("bx:event") of each particle from its SIM provenance; GEN-only particles take
+  // it from a descendant, and a tree inherits it from its root.
+  const key = new Array(n).fill(null);
+  P.forEach(p => { if (p.sim && p.bx !== undefined && p.bx > -999) key[p.id] = `${p.bx}:${p.evt}`; });
+  if (P.length && P[0].bx === undefined) key.fill("0:0");
+  for (let i = order.length - 1; i >= 0; --i) { const u = order[i];
+    if (key[u] === null) key[u] = children[u].map(c => key[c]).find(k => k !== null) ?? null; }
+  for (const u of order) { if (key[u] === null) key[u] = parent[u] >= 0 ? key[parent[u]] : (P[u].genEvent > 0 ? `gen${P[u].genEvent}` : "0:0"); }
+  const isSig = key.map(k => k === "0:0");
+  const groups = new Map();
+  for (const r of roots) { const k = key[r]; if (!groups.has(k)) groups.set(k, {key: k, roots: [], E: 0, rep: r});
+    groups.get(k).roots.push(r); groups.get(k).E += sub[r]; }
+  const repOfRoot = new Map(); for (const g of groups.values()) for (const r of g.roots) repOfRoot.set(r, g.rep);
+  const total = roots.reduce((s, r) => s + sub[r], 0);
+  const sigTotal = roots.filter(r => isSig[r]).reduce((s, r) => s + sub[r], 0);
+  const prodReason = P.map(p => p.prod.length ? ev.vertices[p.prod[0]].reason : "");
+  const hasPU = [...groups.keys()].some(k => k !== "0:0");
+  G = {P, parent, children, direct, roots, depth, sub, total, sigTotal, prodReason, key, isSig, groups, repOfRoot, hasPU};
+}
+
+function members() {
+  const L = $("level").value, P = G.P;
+  $("depthBox").style.display = L === "generation" ? "" : "none";
+  $("levelHelp").textContent = LEVEL_HELP[L] ?? "";
+  if (L === "root") return G.roots;
+  if (L === "interaction") return [...G.groups.values()].map(g => g.rep);
+  if (L === "finest") return P.map(p => p.id);
+  if (L === "generation") { const N = +$("depth").value;
+    return P.filter(p => G.depth[p.id] === N || (G.depth[p.id] < N && !G.children[p.id].length)).map(p => p.id); }
+  const bit = ev.levels.find(l => l.name === L).bit;
+  return P.filter(p => p.levels & bit).map(p => p.id);
+}
+function labelOf(m) {
+  if ($("level").value === "interaction") { const k = G.key[m];
+    return k === "0:0" ? "signal" : k.startsWith("gen") ? `PU ${k}` : `PU bx ${k.split(":")[0]}, evt ${k.split(":")[1]}`; }
+  return `${pname(G.P[m].pdg)} #${m}${G.hasPU && !G.isSig[m] ? " (PU)" : ""}`;
+}
+
+// True when nothing is selected, or u is a selected particle or a descendant of one.
+function inSel(u) { if (!selected.size) return true;
+  while (u >= 0) { if (selected.has(u)) return true; u = G.parent[u]; } return false; }
+
+function render() {
+  const P = G.P, L = $("level").value, mem = members(), isMem = new Set(mem);
+  // owner = nearest member at or above each particle (for "interaction": the root's group)
+  const owner = new Int32Array(P.length).fill(-2);
+  for (const p of P) { const path = []; let u = p.id, o = -1;
+    while (u >= 0) { if (owner[u] !== -2) { o = owner[u]; break; } path.push(u);
+      if (isMem.has(u)) { o = u; break; }
+      if (G.parent[u] < 0) { o = L === "interaction" ? G.repOfRoot.get(u) : -1; break; }
+      u = G.parent[u]; }
+    for (const q of path) owner[q] = o; }
+  // sim energy per owner, per member, per cell (shown cells only)
+  const owned = new Map(mem.map(m => [m, 0])), cells = new Map(mem.map(m => [m, new Set()]));
+  const cellOwn = new Map(), cellSel = new Map();
+  P.forEach(p => { const o = owner[p.id], s = selected.size && inSel(p.id);
+    p.hits.forEach(([c, e]) => { if (!shownCell(c)) return;
+      if (o >= 0) { owned.set(o, owned.get(o) + e); cells.get(o).add(c); }
+      if (!cellOwn.has(c)) cellOwn.set(c, new Map());
+      const m = cellOwn.get(c); m.set(o, (m.get(o) ?? 0) + e);
+      if (s) cellSel.set(c, (cellSel.get(c) ?? 0) + e); }); });
+  // signal objects first, then by energy, so pileup never takes the signal's colours
+  const ranked = [...mem].sort((a, b) => (G.isSig[b] - G.isSig[a]) || owned.get(b) - owned.get(a));
+  const color = new Map(); let ci = 0;
+  ranked.forEach(m => color.set(m, owned.get(m) > 0 && ci < PALETTE.length ? PALETTE[ci++] : OTHER));
+  const colOf = u => owner[u] < 0 ? cssVar("--unowned") : color.get(owner[u]);
+  const ctx = {owner, owned, cells, cellOwn, cellSel, ranked, color, colOf, isMem};
+  ctx.reco = recoContent(ctx);
+  drawGraph(ctx);
+  drawTable(ctx);
+  drawReco(ctx);
+  drawSelection(ctx);
+  if (typeof Plotly === "undefined")
+    $("plot3d").innerHTML = '<p style="padding:12px">The plotting library (Plotly) failed to load from cdn.jsdelivr.net.</p>';
+  else drawPlot(ctx);
+}
+
+// Truth content of every layer cluster and trackster: sim energy per owner in its cells, each
+// cell weighted by the reco fraction (and a trackster layer cluster by 1/multiplicity).
+function recoContent(ctx) {
+  const lcs = ev.layerClusters.map(lc => { const sh = new Map(); let sel = 0, sim = 0;
+    for (const [c, f] of lc.hits) { const m = ctx.cellOwn.get(c);
+      if (m) for (const [o, e] of m) { sh.set(o, (sh.get(o) ?? 0) + f * e); sim += f * e; }
+      sel += f * (ctx.cellSel.get(c) ?? 0); }
+    return summarise(sh, sim, sel, lc.E); });
+  const set = ev.trackstersets[+$("tsSet").value];
+  const ts = !set ? [] : set.tracksters.map(t => { const sh = new Map(); let sel = 0, sim = 0;
+    for (const [i, mult] of t.lcs) { const w = 1 / (mult || 1), l = lcs[i];
+      for (const [o, e] of l.shares) { sh.set(o, (sh.get(o) ?? 0) + w * e); sim += w * e; }
+      sel += w * l.sel; }
+    return Object.assign(summarise(sh, sim, sel, t.eRoi), {t}); });
+  return {lcs, ts};
+}
+function summarise(shares, sim, sel, E) {
+  let dom = -1, best = 0; for (const [o, e] of shares) if (o >= 0 && e > best) { best = e; dom = o; }
+  return {shares, sim, sel, E, dom, domE: best, purity: sim > 0 ? best / sim : 0};
+}
+
+function drawGraph(ctx) {
+  const P = G.P, minE = (+$("minFrac").value / 100) * (G.sigTotal || G.total);
+  const visible = u => G.sub[u] >= minE || G.sub[u] === 0 && minE === 0;
+  const kids = u => G.children[u].filter(visible).sort((a, b) => G.sub[b] - G.sub[a]);
+  const pos = new Map(); let row = 0, maxD = 0;
+  const place = (u, d) => { maxD = Math.max(maxD, d); const ks = kids(u);
+    if (!ks.length) { pos.set(u, [d, row++]); return; }
+    ks.forEach(k => place(k, d + 1)); pos.set(u, [d, (pos.get(ks[0])[1] + pos.get(ks[ks.length - 1])[1]) / 2]); };
+  G.roots.filter(r => G.isSig[r] && visible(r)).forEach(r => place(r, 0));
+  // pileup: one node per interaction, not its tree
+  const pu = [...G.groups.values()].filter(g => g.key !== "0:0").sort((a, b) => b.E - a.E);
+  const puRows = pu.slice(0, MAX_PU_ROWS), puRow0 = row + (pu.length ? 1.5 : 0);
+  const DX = 92, DY = 18, W = Math.max((maxD + 1) * DX + 80, 360);
+  const H = (puRow0 + puRows.length + (pu.length > MAX_PU_ROWS ? 1 : 0)) * DY + 24;
+  const svg = $("graph"); svg.setAttribute("width", W); svg.setAttribute("height", H);
+  const xy = u => [20 + pos.get(u)[0] * DX, 12 + pos.get(u)[1] * DY];
+  const rad = E => 3 + 6 * Math.sqrt(E / (G.total || 1));
+  let s = "";
+  for (const [u] of pos) { const p = G.parent[u]; if (p < 0 || !pos.has(p)) continue;
+    const [x1, y1] = xy(p), [x2, y2] = xy(u);
+    s += `<path d="M${x1},${y1} C${x1 + DX / 2},${y1} ${x2 - DX / 2},${y2} ${x2},${y2}" fill="none" stroke="${cssVar("--edge")}" stroke-width="1"/>`; }
+  const node = (id, x, y, r, fill, isM, picked, op, label) =>
+    `<g data-id="${id}" opacity="${op}" style="cursor:pointer"><circle cx="${x}" cy="${y}" r="${r}" fill="${fill}"
+      stroke="${isM ? cssVar("--ink") : "none"}" stroke-width="${isM ? 2 : 0}"/>
+      ${picked ? `<circle cx="${x}" cy="${y}" r="${r + 4}" fill="none" stroke="${cssVar("--accent")}" stroke-width="2"/>` : ""}
+      <text x="${x + r + 3}" y="${y + 3}">${label}</text></g>`;
+  for (const [u] of pos) { const [x, y] = xy(u), m = ctx.isMem.has(u);
+    s += node(u, x, y, rad(G.sub[u]), ctx.colOf(u), m, selected.has(u), inSel(u) ? 1 : 0.2, `${pname(P[u].pdg)}${m ? " ◆" : ""}`); }
+  if (pu.length) s += `<text x="20" y="${12 + (puRow0 - 0.8) * DY}" style="fill:var(--muted)">in-time pileup interactions (by calo energy)</text>`;
+  puRows.forEach((g, i) => { const y = 12 + (puRow0 + i) * DY, picked = g.roots.every(r => selected.has(r));
+    s += node(`pu:${g.key}`, 20, y, rad(g.E), ctx.colOf(g.rep), false, picked, inSel(g.rep) ? 1 : 0.2,
+      `PU ${g.key} · ${g.roots.length} roots · ${(1e3 * g.E).toFixed(1)} MeV`); });
+  if (pu.length > MAX_PU_ROWS) s += `<text x="20" y="${12 + (puRow0 + puRows.length) * DY}" style="fill:var(--muted)">… ${pu.length - MAX_PU_ROWS} more pileup interactions,
+    ${(1e3 * pu.slice(MAX_PU_ROWS).reduce((a, g) => a + g.E, 0)).toFixed(0)} MeV</text>`;
+  svg.innerHTML = s;
+  svg.querySelectorAll("g").forEach(g => {
+    const id = g.dataset.id;
+    if (id.startsWith("pu:")) { const grp = G.groups.get(id.slice(3));
+      g.onmousemove = e => showTipHtml(e, `<b>pileup interaction ${grp.key}</b> (bx:event)<br>${grp.roots.length} root particles<br>calo sim E ${(1e3 * grp.E).toFixed(1)} MeV`);
+      g.onclick = () => { const on = grp.roots.every(r => selected.has(r)); grp.roots.forEach(r => on ? selected.delete(r) : selected.add(r)); render(); };
+    } else { const u = +id; g.onmousemove = e => showTip(e, u);
+      g.onclick = () => { selected.has(u) ? selected.delete(u) : selected.add(u); render(); }; }
+    g.onmouseleave = () => tip.style.display = "none";
+  });
+}
+
+function showTipHtml(e, html) {
+  tip.innerHTML = html; tip.style.display = "block";
+  tip.style.left = Math.min(e.clientX + 12, innerWidth - 350) + "px"; tip.style.top = (e.clientY + 12) + "px";
+}
+function showTip(e, u) {
+  const p = G.P[u], lv = ev.levels.filter(l => p.levels & l.bit).map(l => l.name).join(", ") || "none";
+  showTipHtml(e, `<b>#${u} ${pname(p.pdg)}</b> (pdg ${p.pdg}) ${p.gen ? "GEN" : ""}${p.gen && p.sim ? "+" : ""}${p.sim ? "SIM" : ""}
+    ${G.hasPU ? `· ${G.isSig[u] ? "signal" : "PU " + G.key[u]}` : ""}<br>
+    E = ${p.E.toFixed(2)} GeV, η = ${p.eta.toFixed(2)}<br>produced by: ${G.prodReason[u] || "n/a"}<br>
+    calo sim E: own ${(1e3 * G.direct[u]).toFixed(1)} MeV, subtree ${(1e3 * G.sub[u]).toFixed(1)} MeV
+    (${(100 * G.sub[u] / (G.total || 1)).toFixed(1)}% of event)<br>levels: ${lv}${p.bs ? "<br>back-scattered" : ""}`);
+}
+
+function vpos(v) { const x = ev.vertices[v]; return [x.x, x.y, x.z]; }
+
+// Detector views. beam: x-y looking down the beam line; side: rho-z with rho signed by y (the
+// CMS rho-z convention); 3d needs WebGL, the two 2D views are plain SVG and work everywhere.
+function project(view) {
+  if (view === "beam") return ([x, y]) => [x, y];
+  if (view === "side") return ([x, y, z]) => [z, (y < 0 ? -1 : 1) * Math.hypot(x, y)];
+  return ([x, y, z]) => [z, x, y];
+}
+function drawPlot(ctx) {
+  const view = $("view").value, is3d = view === "3d", proj = project(view), show = $("show").value;
+  const truthCol = k => k === "unowned" ? cssVar("--unowned") : k === "other" ? OTHER : ctx.color.get(k);
+  const keyOf = o => o < 0 ? "unowned" : (ctx.color.get(o) === OTHER ? "other" : o);
+  const nameOf = k => k === "unowned" ? "not covered by level" : k === "other" ? "other members" : labelOf(k);
+  const mk = () => ({x: [], y: [], z: [], s: [], t: []});
+  const push = (g, pt) => { const q = proj(pt); g.x.push(q[0]); g.y.push(q[1]); if (is3d) g.z.push(q[2]); };
+  const brk = g => { g.x.push(null); g.y.push(null); if (is3d) g.z.push(null); };
+  const size = (e, e0) => Math.max(2, Math.min(12, 2 + 1.6 * Math.log10(e / e0))) * (is3d ? 0.8 : 1);
+  const groups = new Map(), gget = (k, col, name) => { if (!groups.has(k)) groups.set(k, Object.assign(mk(), {col, name})); return groups.get(k); };
+  if (show === "hits") {
+    $("plotTitle").textContent = "Calorimeter sim hits";
+    G.P.forEach(p => { if (!inSel(p.id)) return; const k = keyOf(ctx.owner[p.id]);
+      const g = gget(k, truthCol(k), nameOf(k));
+      p.hits.forEach(([c, e]) => { if (!shownCell(c)) return; const cell = ev.cells[c];
+        push(g, cell); g.s.push(size(e, 1e-6));
+        g.t.push(`${pname(p.pdg)} #${p.id}<br>${(1e3 * e).toFixed(3)} MeV sim<br>z=${cell[2].toFixed(1)} cm`); }); });
+  } else if (show === "lc") {
+    $("plotTitle").textContent = "Layer clusters (colour = dominant truth object)";
+    ev.layerClusters.forEach((lc, i) => { const r = ctx.reco.lcs[i];
+      if (selected.size && r.sel <= 0) return;
+      const k = r.sim > 0 ? keyOf(r.dom) : "noise";
+      const g = gget(k, k === "noise" ? cssVar("--edge") : truthCol(k), k === "noise" ? "no sim energy (noise)" : nameOf(k));
+      push(g, [lc.x, lc.y, lc.z]); g.s.push(size(lc.E, 1e-3));
+      g.t.push(`LC ${i}: ${lc.E.toFixed(3)} GeV, ${lc.hits.length} cells<br>${r.sim > 0 ? `${nameOf(keyOf(r.dom))}: purity ${(100 * r.purity).toFixed(0)}%` : "no sim energy"}`); });
+  } else {
+    const set = ev.trackstersets[+$("tsSet").value], byReco = $("colorBy").value === "reco";
+    $("plotTitle").textContent = `Tracksters: ${set.name} (points = their layer clusters)`;
+    const order = ctx.reco.ts.map((r, i) => i).sort((a, b) => ctx.reco.ts[b].E - ctx.reco.ts[a].E);
+    const tcol = new Map(order.map((i, j) => [i, j < PALETTE.length ? PALETTE[j] : OTHER]));
+    order.forEach(i => { const r = ctx.reco.ts[i];
+      if (selected.size && r.sel <= 0) return;
+      let k, col, name;
+      if (byReco) { k = tcol.get(i) === OTHER ? "tsother" : `ts${i}`; col = tcol.get(i);
+        name = k === "tsother" ? "other tracksters" : `T${i}: ${r.E.toFixed(1)} GeV`; }
+      else { k = r.sim > 0 ? keyOf(r.dom) : "noise"; col = k === "noise" ? cssVar("--edge") : truthCol(k);
+        name = k === "noise" ? "no sim energy" : nameOf(k); }
+      const g = gget(k, col, name);
+      for (const [l] of r.t.lcs) { const lc = ev.layerClusters[l]; push(g, [lc.x, lc.y, lc.z]); g.s.push(size(lc.E, 1e-3));
+        g.t.push(`T${i} (${r.E.toFixed(2)} GeV in view)<br>dominant: ${r.dom >= 0 ? nameOf(keyOf(r.dom)) : "none"}, purity ${(100 * r.purity).toFixed(0)}%<br>LC ${l}: ${lc.E.toFixed(3)} GeV`); } });
+  }
+  const traces = [], T = is3d ? "scatter3d" : "scatter";
+  // Plotly draws later traces on top: pileup and "other" first, the signal objects last.
+  const sigFirst = [...groups.entries()].sort(([a], [b]) => (typeof b === "number" && G.isSig[b]) - (typeof a === "number" && G.isSig[a]));
+  for (const g of sigFirst.reverse().map(([, g]) => g))
+    traces.push({type: T, mode: "markers", name: g.name, x: g.x, y: g.y, z: g.z, text: g.t, hoverinfo: "text",
+      marker: {size: g.s, color: g.col, opacity: 0.75, line: {width: 0}}});
+  if ($("showTracks").checked) {
+    const minE = (+$("minFrac").value / 100) * (G.sigTotal || G.total), byCol = new Map();
+    G.P.forEach(p => { if (G.sub[p.id] < minE || !p.prod.length || !inSel(p.id)) return;
+      if (G.hasPU && !G.isSig[p.id] && !selected.size) return;  // pileup tracks only when selected
+      const a = vpos(p.prod[0]);
+      // End at the boundary crossing when recorded: a decay vertex can be a shortcut edge (a dropped
+      // descendant's vertex re-attached to the nearest saved ancestor) that is not on this track.
+      let b = p.cb ? p.cb.slice(0, 3) : p.dec.length ? vpos(p.dec[0]) : null;
+      if (!b && p.hits.length) { let w = 0; b = [0, 0, 0];
+        p.hits.forEach(([c, e]) => { const q = ev.cells[c]; b[0] += e * q[0]; b[1] += e * q[1]; b[2] += e * q[2]; w += e; });
+        b = b.map(v => v / w); }
+      if (!b) return;
+      const c = ctx.colOf(p.id); if (!byCol.has(c)) byCol.set(c, mk());
+      const g = byCol.get(c);
+      for (let i = 0; i <= 12; ++i) { const t = i / 12; push(g, [0, 1, 2].map(j => a[j] + t * (b[j] - a[j]))); }
+      brk(g); });
+    let first = true;
+    for (const [c, g] of byCol) { traces.push({type: T, mode: "lines", name: "trajectories (straight: production → calo boundary or next vertex)",
+      legendgroup: "traj", showlegend: first, x: g.x, y: g.y, z: g.z, hoverinfo: "skip", line: {color: c, width: 2}});
+      first = false; }
+  }
+  // Which endcap the event is in, from the energy-weighted hit z.
+  let sz = 0; G.P.forEach(p => p.hits.forEach(([c, e]) => sz += e * ev.cells[c][2]));
+  const side = sz < 0 ? -1 : 1;
+  if ($("showDet").checked) { const g = mk(); hgcalOutline(side, view).forEach(seg => { seg.forEach(pt => push(g, pt)); brk(g); });
+    traces.push({type: T, mode: "lines", name: "HGCal envelope (approx.)", x: g.x, y: g.y, z: g.z, hoverinfo: "skip",
+      line: {color: cssVar("--edge"), width: 1}}); }
+  const ax = t => ({title: t, gridcolor: cssVar("--line"), color: cssVar("--muted"), zerolinecolor: cssVar("--line"),
+    backgroundcolor: cssVar("--panel")});
+  const layout = {margin: {l: 50, r: 170, t: 10, b: 40}, paper_bgcolor: cssVar("--panel"), plot_bgcolor: cssVar("--panel"),
+    font: {color: cssVar("--ink")}, legend: {x: 1.01, xanchor: "left", y: 1, font: {size: 11}, bgcolor: "rgba(0,0,0,0)"},
+    uirevision: $("event").value + view, hovermode: "closest"};
+  if (is3d) { layout.margin = {l: 0, r: 170, t: 0, b: 0};
+    layout.scene = {xaxis: ax("z [cm]"), yaxis: ax("x [cm]"), zaxis: ax("y [cm]"), aspectmode: "data",
+      camera: {eye: {x: -1.6 * side, y: -1.2, z: 0.8}, up: {x: 0, y: 0, z: 1}}}; }
+  else { layout.xaxis = ax(view === "beam" ? "x [cm]" : "z [cm]");
+    layout.yaxis = Object.assign(ax(view === "beam" ? "y [cm]" : "ρ [cm] (signed by y)"), {scaleanchor: "x", scaleratio: 1});
+    // A cone around the signal is small next to the endcap: frame the points, not the outline.
+    if (ev.roiDeltaR > 0) { const xs = [], ys = [];
+      for (const g of groups.values()) { g.x.forEach(v => v !== null && xs.push(v)); g.y.forEach(v => v !== null && ys.push(v)); }
+      if (xs.length) { const pad = 15, lo = a => Math.min(...a) - pad, hi = a => Math.max(...a) + pad;
+        layout.xaxis.range = [lo(xs), hi(xs)]; layout.yaxis.range = [lo(ys), hi(ys)]; } } }
+  Plotly.react("plot3d", traces, layout, {responsive: true});
+}
+
+// Approximate HGCal envelope for orientation only: front face |z| = 321 cm, back face 513 cm
+// (last HGCal cells in these events), 1.5 < |eta| < 3.0. Polylines of points [x, y, z].
+function hgcalOutline(side, view) {
+  const r = (zz, eta) => zz / Math.sinh(eta), Z0 = 321 * side, Z1 = 513 * side, segs = [];
+  if (view === "side") {
+    for (const s of [1, -1]) segs.push([[0, s * r(321, 3), Z0], [0, s * r(321, 1.5), Z0], [0, s * r(513, 1.5), Z1],
+                                        [0, s * r(513, 3), Z1], [0, s * r(321, 3), Z0]]);
+    return segs; }
+  for (const [zz, Z] of [[321, Z0], [513, Z1]]) for (const eta of [1.5, 3.0]) {
+    const ring = []; for (let i = 0; i <= 72; ++i) { const f = 2 * Math.PI * i / 72;
+      ring.push([r(zz, eta) * Math.cos(f), r(zz, eta) * Math.sin(f), Z]); } segs.push(ring); }
+  if (view === "3d") for (const eta of [1.5, 3.0]) for (const f of [0, Math.PI / 2, Math.PI, 1.5 * Math.PI])
+    segs.push([[r(321, eta) * Math.cos(f), r(321, eta) * Math.sin(f), Z0], [r(513, eta) * Math.cos(f), r(513, eta) * Math.sin(f), Z1]]);
+  return segs;
+}
+
+// Totals over the union of the selected subtrees, so selecting a particle and one of its
+// descendants counts the descendant once. "Incoming" energy uses the energy at the calo-boundary
+// crossing when the particle has one, otherwise its energy at production.
+function drawSelection(ctx) {
+  const box = $("selInfo");
+  if (!selected.size) { box.innerHTML = '<span style="color:var(--muted)">Nothing selected. Click particles (or pileup interactions) in the graph.</span>'; return; }
+  const gun = G.P.find(p => p.gen && G.isSig[p.id] && Math.abs(p.pdg) === 211) ?? G.P[G.roots[0]];
+  let calo = 0; G.P.forEach(p => { if (inSel(p.id)) calo += G.direct[p.id]; });
+  const top = [...selected].filter(u => { let a = G.parent[u]; while (a >= 0) { if (selected.has(a)) return false; a = G.parent[a]; } return true; });
+  const eIn = u => G.P[u].cb ? G.P[u].cb[3] : G.P[u].E;
+  const incoming = top.filter(u => G.isSig[u]).reduce((s, u) => s + eIn(u), 0);
+  const dets = $("otherCalo").checked ? "HGCal + ECAL + HCAL" : "HGCal";
+  const nested = selected.size - top.length;
+  let reco = "";
+  const show = $("show").value;
+  if (show === "ts") {
+    const rs = ctx.reco.ts.map((r, i) => [i, r]).filter(([, r]) => r.sel > 0).sort((a, b) => b[1].sel - a[1].sel);
+    reco = `<div class="big">Tracksters touching the selection: <b>${rs.length}</b>. ` + rs.slice(0, 4).map(([i, r]) =>
+      `T${i} holds <b>${(100 * r.sel / (calo || 1)).toFixed(1)}%</b> of it (and it is ${(100 * r.sel / (r.sim || 1)).toFixed(0)}% of T${i})`).join("; ") + "</div>";
+  } else if (show === "lc") {
+    const rs = ctx.reco.lcs.filter(r => r.sel > 0), held = rs.reduce((s, r) => s + r.sel, 0);
+    reco = `<div class="big"><b>${rs.length}</b> layer clusters touch the selection; they hold <b>${(100 * held / (calo || 1)).toFixed(1)}%</b> of its sim energy</div>`;
+  }
+  box.innerHTML = `<div class="big"><b>${(100 * calo / (G.total || 1)).toFixed(1)}%</b> of the event's ${dets} sim energy in view
+      (${(1e3 * calo).toFixed(1)} of ${(1e3 * G.total).toFixed(0)} MeV)</div>
+    <div class="big"><b>${(100 * incoming / gun.E).toFixed(1)}%</b> of the incoming signal ${pname(gun.pdg)} energy
+      (${incoming.toFixed(2)} of ${gun.E.toFixed(2)} GeV, particle energy at the calo boundary where recorded; pileup not counted)</div>
+    ${reco}
+    <div style="color:var(--muted)">${selected.size} selected${nested ? `, ${nested} inside another selected subtree (counted once)` : ""}. Click a chip to deselect.</div>
+    ${$("otherCalo").checked ? `<div style="color:var(--muted)">⚠ ${MIX_WARN}</div>` : ""}
+    <div class="chips">${[...selected].slice(0, 60).map(u => `<span class="chip" data-id="${u}"><span class="sw" style="background:${ctx.colOf(u)}"></span>${pname(G.P[u].pdg)} #${u}${G.isSig[u] ? "" : " PU"}:
+      ${eIn(u).toFixed(2)} GeV${G.P[u].cb ? " @boundary" : ""}, calo ${(1e3 * G.sub[u]).toFixed(1)} MeV</span>`).join("")}${selected.size > 60 ? ` … ${selected.size - 60} more` : ""}</div>`;
+  box.querySelectorAll(".chip").forEach(c => c.onclick = () => { selected.delete(+c.dataset.id); render(); });
+}
+
+function drawReco(ctx) {
+  const show = $("show").value;
+  $("tsBox").style.display = show === "ts" ? "" : "none";
+  $("colorBox").style.display = show === "ts" ? "" : "none";
+  $("recoWrap").style.display = show === "ts" ? "" : "none";
+  if (show !== "ts") return;
+  const set = ev.trackstersets[+$("tsSet").value];
+  const rows = ctx.reco.ts.map((r, i) => [i, r]).sort((a, b) => b[1].E - a[1].E);
+  $("recoTitle").textContent = `Tracksters: ${set.name}`;
+  $("recoNote").textContent = `${rows.length} tracksters${ev.roiDeltaR > 0 ? ` with layer clusters inside ΔR < ${ev.roiDeltaR} of the signal (energy = their part inside it)` : ""}. ` +
+    "Purity = share of the trackster's sim energy from its dominant truth object. Captures = share of that truth object's sim energy that is in this trackster.";
+  let h = "<tr><th>trackster</th><th>dominant truth object</th><th>E [GeV]</th><th>layer clusters</th><th>purity</th><th>captures</th><th>no-sim share</th></tr>";
+  for (const [i, r] of rows.slice(0, 80)) {
+    const name = r.dom >= 0 ? `<span class="sw" style="background:${ctx.color.get(r.dom) ?? OTHER}"></span>${labelOf(r.dom)}` : "none";
+    const cap = r.dom >= 0 ? r.domE / (ctx.owned.get(r.dom) || 1) : 0;
+    h += `<tr><td>T${i}</td><td>${name}</td><td>${r.E.toFixed(2)}</td><td>${r.t.lcs.length}</td>
+      <td>${(100 * r.purity).toFixed(0)}%</td><td>${(100 * cap).toFixed(0)}%</td><td>${r.sim > 0 ? "" : "100%"}</td></tr>`; }
+  if (rows.length > 80) h += `<tr><td colspan="7">… ${rows.length - 80} more</td></tr>`;
+  $("recoTable").innerHTML = h;
+}
+
+function drawTable(ctx) {
+  const rows = ctx.ranked.filter(m => ctx.owned.get(m) > 0);
+  const cov = rows.reduce((s, m) => s + ctx.owned.get(m), 0);
+  const dets = $("otherCalo").checked ? "HGCal + ECAL + HCAL" : "HGCal";
+  $("summary").textContent = `${ctx.ranked.length} members at this level, ${rows.length} with ${dets} energy. ` +
+    `They cover ${(100 * cov / (G.total || 1)).toFixed(1)}% of the event's ${(1e3 * G.total).toFixed(0)} MeV ${dets} sim energy` +
+    (ev.roiDeltaR > 0 ? ` inside ΔR < ${ev.roiDeltaR} of the signal.` : ".") + ($("otherCalo").checked ? " ⚠ " + MIX_WARN : "");
+  let h = "<tr><th>object</th><th>produced by</th><th>gen/sim E [GeV]</th><th>η</th><th>calo sim E [MeV]</th><th>share</th><th>cells</th></tr>";
+  for (const m of rows.slice(0, 60)) { const p = G.P[m];
+    const byInt = $("level").value === "interaction";
+    h += `<tr><td><span class="sw" style="background:${ctx.color.get(m)}"></span>${labelOf(m)}</td><td>${byInt ? "—" : G.prodReason[m] || "n/a"}</td>
+      <td>${byInt ? "—" : p.E.toFixed(2)}</td><td>${byInt ? "—" : p.eta.toFixed(2)}</td><td>${(1e3 * ctx.owned.get(m)).toFixed(1)}</td>
+      <td>${(100 * ctx.owned.get(m) / (G.total || 1)).toFixed(1)}%</td><td>${ctx.cells.get(m).size}</td></tr>`; }
+  if (rows.length > 60) h += `<tr><td colspan="7">… ${rows.length - 60} more</td></tr>`;
+  $("table").innerHTML = h;
+}
+init();
+</script>
+</body>
+</html>

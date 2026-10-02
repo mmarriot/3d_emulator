@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trackster Metrics Viewer</title>
+<script src="https://cdn.jsdelivr.net/npm/plotly.js-dist-min@2.35.2/plotly.min.js"></script>
+<style>
+:root {
+  --bg: #fafaf9; --panel: #ffffff; --ink: #1c1917; --muted: #78716c; --line: #e7e5e4;
+  --accent: #2563eb; --faint: #d6d3d1; --soft: #a8a29e;
+  --link: #1c1917; --chain: #2563eb; --nolink: #dc2626; --apart: #d97706;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0c0a09; --panel: #1c1917; --ink: #f5f5f4; --muted: #a8a29e; --line: #292524;
+    --accent: #60a5fa; --faint: #44403c; --soft: #78716c;
+    --link: #f5f5f4; --chain: #60a5fa; --nolink: #f87171; --apart: #fbbf24;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { padding: 16px; border-bottom: 1px solid var(--line); }
+h1 { margin: 0 0 4px; font-size: 18px; }
+header p { margin: 4px 0 0; color: var(--muted); max-width: 90em; }
+code { font-size: 12.5px; }
+.controls { display: flex; flex-wrap: wrap; gap: 12px 20px; padding: 12px 16px; align-items: end;
+  border-bottom: 1px solid var(--line); }
+.controls label { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); }
+select, input[type=number] { font: inherit; color: var(--ink); background: var(--panel);
+  border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; max-width: 100%; }
+button { font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 6px;
+  padding: 3px 10px; cursor: pointer; }
+main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; padding: 12px 16px; }
+@media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+.panel h2 { margin: 0; padding: 8px 12px; font-size: 13px; border-bottom: 1px solid var(--line); }
+.wide { grid-column: 1 / -1; }
+.scroll { overflow-x: auto; }
+.plot { height: 600px; }
+.note { padding: 6px 12px; color: var(--muted); font-size: 12.5px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { padding: 3px 9px; border-bottom: 1px solid var(--line); text-align: right; white-space: nowrap; }
+th { font-weight: 600; font-size: 12px; color: var(--muted); position: sticky; top: 0; background: var(--panel); }
+td.l, th.l { text-align: left; }
+tr.click { cursor: pointer; }
+tr.click:hover td { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+tr.on td { background: color-mix(in srgb, var(--accent) 16%, transparent); }
+.tbl { max-height: 420px; overflow: auto; }
+.sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+.metrics td, .metrics th { white-space: normal; }
+.metrics td.v { font-size: 18px; font-weight: 600; }
+.bar { display: flex; height: 16px; border-radius: 4px; overflow: hidden; min-width: 200px; }
+.bar span { display: block; height: 100%; }
+#focus { padding: 10px 12px; }
+#focus h3 { margin: 0 0 6px; font-size: 15px; }
+#focus p { margin: 6px 0; max-width: 95em; }
+#focus .calc { font-variant-numeric: tabular-nums; background: color-mix(in srgb, var(--accent) 6%, transparent);
+  border-left: 3px solid var(--accent); padding: 6px 10px; margin: 8px 0; }
+#focus table { width: auto; margin: 6px 0; }
+.key { display: inline-flex; align-items: center; gap: 4px; margin-right: 14px; font-size: 12px; color: var(--muted); }
+.key i { display: inline-block; width: 22px; border-top: 2px solid; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+@media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+details { padding: 0 12px 10px; }
+summary { cursor: pointer; color: var(--muted); padding: 6px 0; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Trackster metrics: emulated CLUEstering against truth targets</h1>
+  <p>Base particles (calorimeter-boundary particles of the signal and every in-time pileup interaction) are first split into
+  spatial fragments (deposits more than 0.05 in x/|z|, y/|z| apart, ~16 cm at the front face: a particle that radiated before the
+  calorimeter, or a hadron's far satellites, owns separate impacts). Each fragment is a
+  <b>target</b>, except when it is completely overlapped: with
+  <code>M(a,b) = Σ<sub>l</sub> min(s(l,a), s(l,b)) / min(E<sub>a</sub>, E<sub>b</sub>)</code> the part of the smaller one lying
+  underneath the other in their layer clusters, a fragment with M ≥ τ to a harder one is part of that one's target (the one covering
+  it most). Every decision is between two fragments, nothing is recomputed on groups, and partial overlaps never add up: a target is
+  one shower plus what is hidden inside it.
+  Targets with reachable E<sub>t</sub> ≥ the selection energy are scored.
+  Left: the fragments at the energy-weighted centre of their layer clusters, projected to the front face (x/|z|, y/|z| × 322 cm:
+  true distances, which η–φ distorts at high η), with the pair M between them. Right: the layer clusters.
+  Click a particle, layer cluster or table row to focus a target or trackster; the focus panel works through its terms of C, P and F.</p>
+</header>
+<div class="controls">
+  <label>Event <select id="event"></select></label>
+  <label>Endcap <select id="side"><option value="0">both</option><option value="-1">−z</option><option value="1">+z</option></select></label>
+  <label>Colour layer clusters by <select id="colorBy"><option value="t">dominant target</option><option value="k">trackster</option></select></label>
+  <label>Graph axes <select id="gaxes"><option value="proj">projective x–y at the front face [cm]</option><option value="etaphi">η–φ</option></select></label>
+  <label>Layer-cluster view <select id="view">
+    <option value="proj">projective x–y at the front face [cm]</option>
+    <option value="etaphi">η–φ</option>
+    <option value="side">side (z–ρ)</option>
+    <option value="beam">beam (x–y)</option>
+    <option value="3d">3D (needs WebGL)</option></select></label>
+  <label>Graph without focus: particles ≥ [GeV] <input type="number" id="minE" value="1" min="0" step="0.5" style="width:6em"></label>
+  <label>Draw pairs with M &lt; τ only if M ≥ <input type="number" id="minM" value="0.5" min="0" max="1" step="0.05" style="width:6em"></label>
+  <button id="clear">clear focus</button>
+</div>
+<main>
+  <section class="panel wide"><h2>Objectives (selected targets)</h2><div class="scroll" id="metrics"></div>
+    <details><summary>All diagnostics (metrics.summary)</summary><div class="scroll tbl" id="diag"></div></details></section>
+  <section class="panel"><h2 id="graphTitle">Truth linking graph</h2>
+    <div class="note"><span class="key"><i style="border-color:var(--link)"></i>same target, pair M ≥ τ</span>
+      <span class="key"><i style="border-color:var(--chain);border-top-style:dotted"></i>same target, pair M &lt; τ (joined as groups)</span>
+      <span class="key"><i style="border-color:var(--apart);border-top-style:dashed"></i>different targets, pair M ≥ τ (the soft one joined another group)</span>
+      <span class="key"><i style="border-color:var(--nolink);border-top-style:dashed"></i>different targets, pair M &lt; τ</span>
+      <span class="key">In projective axes an edge runs from each fragment's centre through the point (dot) where their shared energy is.</span>
+      <span id="graphNote"></span></div>
+    <div class="plot" id="graph"></div></section>
+  <section class="panel"><h2 id="lcTitle">Layer clusters</h2><div class="note" id="lcNote"></div><div class="plot" id="lcplot"></div></section>
+  <section class="panel wide"><h2>Focus</h2><div id="focus"></div></section>
+  <section class="panel wide"><h2 id="tTitle">Selected targets</h2><div class="note" id="tNote"></div><div class="tbl scroll" id="tTable"></div></section>
+  <section class="panel wide"><h2 id="kTitle">Tracksters</h2><div class="note" id="kNote"></div><div class="tbl scroll" id="kTable"></div></section>
+</main>
+<script>
+const PAL = ["#2563eb","#dc2626","#16a34a","#d97706","#9333ea","#0891b2","#db2777","#65a30d","#ea580c","#4f46e5",
+             "#0d9488","#b45309","#7c3aed","#059669","#e11d48","#0284c7","#ca8a04","#c026d3","#15803d","#9f1239"];
+const PDG = {211:"π⁺",[-211]:"π⁻",111:"π⁰",22:"γ",11:"e⁻",[-11]:"e⁺",13:"μ⁻",[-13]:"μ⁺",2112:"n",[-2112]:"n̄",
+  2212:"p",[-2212]:"p̄",321:"K⁺",[-321]:"K⁻",130:"K⁰L",310:"K⁰S"};
+const pname = id => PDG[id] ?? (Math.abs(id) > 1000000000 ? "nucl" : String(id));
+const MAX_MEMBERS = 800, MAX_NEIGH = 300, MAX_ROWS = 400;
+const $ = id => document.getElementById(id);
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const f = (x, d = 3) => x === null || x === undefined || !isFinite(x) ? "–" : (+x).toFixed(d);
+const pct = (x, d = 1) => x === null || !isFinite(x) ? "–" : (100 * x).toFixed(d) + "%";
+let IDX, D, X, focus = null, clickBound = false;
+// WebGL scatter when the browser has it, plain SVG otherwise (slower, but works everywhere)
+const GL = (() => { try { return !!document.createElement("canvas").getContext("webgl"); } catch (e) { return false; } })();
+const SC = GL ? "scattergl" : "scatter";
+
+async function getJSON(u) { const r = await fetch(u); if (!r.ok) throw new Error(u + ": " + r.status); return r.json(); }
+
+async function init() {
+  try { IDX = await getJSON("metrics_data/index.json"); }
+  catch (e) { document.body.insertAdjacentHTML("afterbegin", `<p style="padding:16px;color:var(--nolink)">Could not load metrics_data/index.json
+    (${e.message}). Export with <code>python -m ticltune display NTUPLE -o metrics_data</code> and serve this folder over http
+    (<code>python3 -m http.server</code>).</p>`); return; }
+  IDX.events.forEach(e => $("event").add(new Option(e.label, e.file)));
+  $("event").onchange = loadEvent;
+  for (const id of ["side", "colorBy", "view", "gaxes", "minE", "minM"]) $(id).onchange = render;
+  $("clear").onclick = () => setFocus(null);
+  document.addEventListener("click", e => { const r = e.target.closest("[data-k]"); if (r) setFocus({kind: r.dataset.k, id: +r.dataset.id}); });
+  await loadEvent();
+}
+
+async function loadEvent() {
+  D = await getJSON("metrics_data/" + $("event").value);
+  derive();
+  focus = null;
+  // default to the endcap of the signal, if it has a selected target
+  const st = X.selT.find(t => D.targets.sig[t]);
+  $("side").value = st !== undefined ? String(Math.sign(D.targets.eta[st]) || 0) : "0";
+  render();
+}
+
+// Index structures for one event: LC eta/phi, members of each target, pairs of each particle,
+// layer clusters of each trackster and of each dominant target.
+function derive() {
+  const L = D.lc, n = L.x.length, B = D.bp, nb = B.t.length, nt = D.targets.E.length, nk = D.tracksters.E.length;
+  X = {eta: new Float32Array(n), phi: new Float32Array(n), rho: new Float32Array(n)};
+  for (let i = 0; i < n; ++i) { const r = Math.hypot(L.x[i], L.y[i]);
+    X.rho[i] = r; X.eta[i] = Math.asinh(L.z[i] / r); X.phi[i] = Math.atan2(L.y[i], L.x[i]); }
+  X.members = Array.from({length: nt}, () => []);
+  for (let b = 0; b < nb; ++b) X.members[B.t[b]].push(b);
+  X.members.forEach(m => m.sort((a, b) => B.E[b] - B.E[a]));
+  X.adj = Array.from({length: nb}, () => []);
+  const P = D.pairs;
+  for (let p = 0; p < P.a.length; ++p) { X.adj[P.a[p]].push(p); X.adj[P.b[p]].push(p); }
+  X.tsLC = Array.from({length: nk}, () => []); X.tLC = Array.from({length: nt}, () => []);
+  for (let i = 0; i < n; ++i) { if (L.ts[i] >= 0) X.tsLC[L.ts[i]].push(i); if (L.t[i] >= 0) X.tLC[L.t[i]].push(i); }
+  X.selT = D.targets.sel.map((s, t) => s ? t : -1).filter(t => t >= 0).sort((a, b) => D.targets.E[b] - D.targets.E[a]);
+  X.links = new Int32Array(nt);
+  for (let p = 0; p < P.a.length; ++p) if (P.M[p] >= D.tau) X.links[B.t[P.a[p]]]++;
+  X.ts = [...Array(nk).keys()].sort((a, b) => D.tracksters.E[b] - D.tracksters.E[a]);
+}
+
+const tCol = t => t < 0 ? css("--faint") : D.targets.sel[t] ? PAL[t % PAL.length] : css("--soft");
+const kCol = k => k < 0 ? css("--faint") : PAL[k % PAL.length];
+const sideOk = eta => { const s = +$("side").value; return !s || Math.sign(eta) === s; };
+const FRONT = 322, SHIFT = 150;
+const shift = sign => +$("side").value ? 0 : (sign < 0 ? -SHIFT : SHIFT);
+const gpos = b => $("gaxes").value === "proj" ? [D.bp.px[b] + shift(D.bp.eta[b]), D.bp.py[b]] : [D.bp.eta[b], D.bp.phi[b]];
+const projNote = () => +$("side").value ? "" : ` (−z drawn at x − ${SHIFT}, +z at x + ${SHIFT})`;
+const tName = t => `t${t}${D.targets.sig[t] ? " (signal)" : ""}`;
+// a unit = fragment f of base particle b: "#b" for the main one, "#b.f" for the others
+const uName = u => `#${D.bp.id[u]}${D.bp.frag[u] ? "." + D.bp.frag[u] : ""}`;
+const interName = i => D.signal_interactions.includes(i) ? "signal" : `PU #${i}`;
+
+function setFocus(fc) { focus = fc; render(); if (fc) $("focus").scrollIntoView({behavior: "smooth", block: "nearest"}); }
+
+function render() {
+  drawMetrics(); drawGraph(); drawLC(); bindClicks(); drawFocus(); drawTargets(); drawTracksters();
+}
+
+// ---------------------------------------------------------------- objectives
+function drawMetrics() {
+  const E = D.sums, A = IDX.sums, se = D.summary, sa = IDX.summary;
+  const frac = (n, d) => d > 0 ? n / d : NaN;
+  const cell = (n, d, nu = "GeV", dig = 1) => `<td>${f(n, dig)} / ${f(d, dig)} ${nu}</td><td class="v">${f(frac(n, d), 3)}</td>`;
+  const decomp = s => { const parts = [[s.P, "var(--accent)", "main target (P)"], [s.selts_other_sel_frac, "#d97706", "other selected targets"],
+      [s.selts_soft_frac, "var(--soft)", "soft targets"], [s.selts_notruth_frac, "var(--nolink)", "no truth"]];
+    return `<div class="bar" title="${parts.map(p => `${p[2]} ${pct(p[0])}`).join(", ")}">${parts.map(p => `<span style="width:${100 * (p[0] || 0)}%;background:${p[1]}"></span>`).join("")}</div>
+      <div style="font-size:12px;color:var(--muted)">${parts.map(p => `${p[2]} ${pct(p[0])}`).join(" · ")}</div>`; };
+  $("metrics").innerHTML = `<table class="metrics">
+    <tr><th class="l">objective</th><th class="l">definition</th><th>this event: numerator / denominator</th><th>value</th><th>all ${IDX.events.length} events</th><th>value</th></tr>
+    <tr><td class="l"><b>C</b> completeness</td><td class="l">Σ<sub>sel t</sub> max<sub>k</sub> e(t,k) / Σ<sub>sel t</sub> E<sub>t</sub> — each selected target's best trackster</td>
+      ${cell(E.sel_best, E.sel_E)}${cell(A.sel_best, A.sel_E)}</tr>
+    <tr><td class="l"><b>P</b> purity</td><td class="l">Σ<sub>sel k</sub> e(main(k),k) / Σ<sub>sel k</sub> E<sub>k</sub> — tracksters whose largest target is selected
+      ${decomp(se)}</td>${cell(E.selts_main, E.selts_E)}${cell(A.selts_main, A.selts_E)}</tr>
+    <tr><td class="l"><b>F</b> fragmentation</td><td class="l">Σ<sub>sel t</sub> E<sub>t</sub>·N<sub>frag</sub>(t) / Σ<sub>sel t</sub> E<sub>t</sub>, N<sub>frag</sub> = 1/Σ<sub>k</sub> f<sub>tk</sub>², f<sub>tk</sub> = e(t,k)/Σ<sub>k</sub>e(t,k). 1 = one trackster</td>
+      ${cell(E.sel_frag_num, E.sel_frag_den, "GeV")}${cell(A.sel_frag_num, A.sel_frag_den, "GeV")}</tr>
+    </table>
+    <div class="note">τ = ${D.tau}, selected = E<sub>t</sub> ≥ ${D.select_energy} GeV. This event: ${E.sel_n} selected targets
+    (${pct(se.sel_energy_frac)} of all target energy), ${E.all_n} targets in all, ${E.selts_n} scored tracksters of ${E.ts_n}.
+    The largest selected target holds ${pct(D.targets.E[X.selT[0]] / E.sel_E)} of the C and F denominators.
+    Buried (M<sub>rest</sub> ≥ 0.5, not individually reconstructable by any trackster of whole layer clusters):
+    ${X.selT.filter(t => D.targets.mrest[t] >= 0.5).length} selected targets, ${pct(X.selT.filter(t => D.targets.mrest[t] >= 0.5).reduce((a, t) => a + D.targets.E[t], 0) / E.sel_E)} of the C and F denominators.</div>`;
+  const keys = Object.keys(sa);
+  $("diag").innerHTML = `<table><tr><th class="l">quantity</th><th>this event</th><th>all events</th></tr>` +
+    keys.map(k => `<tr><td class="l">${k}</td><td>${f(se[k], 4)}</td><td>${f(sa[k], 4)}</td></tr>`).join("") + "</table>";
+}
+
+// ---------------------------------------------------------------- linking graph
+function graphNodes() {
+  const B = D.bp, P = D.pairs, nodes = new Set();
+  let note = "";
+  const addNeighbours = (from, limit) => {
+    const cand = new Map();
+    for (const u of from) for (const p of X.adj[u]) { const v = P.a[p] === u ? P.b[p] : P.a[p];
+      if (!nodes.has(v) && P.M[p] > (cand.get(v) ?? -1)) cand.set(v, P.M[p]); }
+    const top = [...cand].sort((a, b) => b[1] - a[1]).slice(0, limit);
+    top.forEach(([v]) => nodes.add(v));
+    return [cand.size, top.length];
+  };
+  if (focus && focus.kind === "t") {
+    const mem = X.members[focus.id], shown = mem.slice(0, MAX_MEMBERS);
+    shown.forEach(b => nodes.add(b));
+    const [nc, nn] = addNeighbours(shown, MAX_NEIGH);
+    note = `Target t${focus.id}: ${shown.length}${mem.length > shown.length ? ` most energetic of ${mem.length}` : ""} member${shown.length > 1 ? "s" : ""}, ` +
+      `plus ${nn}${nc > nn ? ` of ${nc}` : ""} neighbours from other targets (strongest M first).`;
+  } else if (focus && focus.kind === "k") {
+    const [ts] = D.tracksters.comp[focus.id];
+    ts.forEach(t => X.members[t].slice(0, 200).forEach(b => nodes.add(b)));
+    note = `Members of the ${ts.length} largest targets in trackster T${focus.id} (up to 200 each).`;
+  } else {
+    const minE = +$("minE").value;
+    for (let b = 0; b < B.t.length; ++b) if (B.E[b] >= minE && sideOk(B.eta[b])) nodes.add(b);
+    note = `${nodes.size} particles with ≥ ${minE} GeV reachable energy.`;
+  }
+  return [nodes, note];
+}
+
+function drawGraph() {
+  const B = D.bp, P = D.pairs, tau = D.tau, minM = +$("minM").value;
+  const [nodes, note] = graphNodes();
+  $("graphNote").textContent = note;
+  const E = {link: [[], [], [], []], chain: [[], [], [], []], apart: [[], [], [], []], none: [[], [], [], []]};  // x, y, mid x, mid y + text
+  for (const u of nodes) for (const p of X.adj[u]) {
+    const a = P.a[p], b = P.b[p]; if (a !== u) continue;  // each pair once
+    if (!nodes.has(b)) continue;
+    const M = P.M[p], same = B.t[a] === B.t[b], cls = same ? (M >= tau ? "link" : "chain") : (M >= tau ? "apart" : "none");
+    if (M < tau && M < minM) continue;
+    const g = E[cls];
+    // projective: from each fragment's centre through the point where their shared energy is
+    const pa = gpos(a), pb = gpos(b);
+    const po = $("gaxes").value === "proj" ? [P.ox[p] + shift(B.eta[a]), P.oy[p]] : [(pa[0] + pb[0]) / 2, (pa[1] + pb[1]) / 2];
+    g[0].push(pa[0], po[0], pb[0], null); g[1].push(pa[1], po[1], pb[1], null);
+    g[2].push(po[0]); g[3].push(po[1]);
+    (g[4] ??= []).push(`M = ${f(M, 3)} ${M >= tau ? "≥" : "<"} τ = ${tau}<br>shared ${f(M * Math.min(B.E[a], B.E[b]), 3)} GeV of min(E) = ${f(Math.min(B.E[a], B.E[b]), 3)} GeV<br>` +
+      `${uName(a)} (t${B.t[a]}) – ${uName(b)} (t${B.t[b]})`);
+  }
+  const style = {link: [css("--link"), "solid", 1.6, "same target, M ≥ τ"], chain: [css("--chain"), "dot", 1.2, "same target, M < τ"],
+                 apart: [css("--apart"), "dash", 1.4, "different targets, M ≥ τ"], none: [css("--nolink"), "dash", 1.2, "different targets, M < τ"]};
+  const traces = [];
+  for (const [k, g] of Object.entries(E)) { if (!g[0].length) continue; const [c, dash, w, name] = style[k];
+    traces.push({type: SC, mode: "lines", x: g[0], y: g[1], line: {color: c, dash, width: w}, hoverinfo: "skip", name, showlegend: false});
+    traces.push({type: SC, mode: "markers", x: g[2], y: g[3], text: g[4], hoverinfo: "text", marker: {size: 5, color: c, opacity: 0.7},
+      showlegend: false}); }
+  const nl = [...nodes], foc = focus && focus.kind === "t" ? focus.id : -2;
+  const kTargets = focus && focus.kind === "k" ? new Set(D.tracksters.comp[focus.id][0]) : null;
+  traces.push({type: SC, mode: "markers", x: nl.map(b => gpos(b)[0]), y: nl.map(b => gpos(b)[1]), customdata: nl,
+    marker: {size: nl.map(b => Math.max(4, Math.min(28, 4 + 5 * Math.sqrt(B.E[b])))), color: nl.map(b => tCol(B.t[b])),
+      opacity: 0.85, line: {width: nl.map(b => B.t[b] === foc || kTargets?.has(B.t[b]) ? 2 : 0), color: css("--ink")}},
+    text: nl.map(b => { const t = B.t[b];
+      return `${uName(b)} ${pname(B.pdg[b])} · ${interName(B.inter[b])}<br>reachable ${f(B.E[b], 3)} GeV (particle: ${f(B.Ein[b], 2)} GeV at boundary)${B.frag[b] ? `<br>fragment ${B.frag[b]} of particle #${B.id[b]} (a separate deposit)` : ""}<br>` +
+        `target ${tName(t)}: ${f(D.targets.E[t], 2)} GeV, ${D.targets.n[t]} particles, ${D.targets.sel[t] ? "selected" : "soft"}`; }),
+    hoverinfo: "text", showlegend: false});
+  $("graphTitle").textContent = "Truth linking graph" + (focus ? ` — ${focus.kind === "t" ? "target t" : "trackster T"}${focus.id}` : "");
+  const proj = $("gaxes").value === "proj";
+  const layout = baseLayout(proj ? {xaxis: ax(`x/|z| × ${FRONT} cm (energy-weighted over its layer clusters)${projNote()}`), yaxis: Object.assign(ax(`y/|z| × ${FRONT} cm`), {scaleanchor: "x", scaleratio: 1})}
+                                 : {xaxis: ax("η (energy-weighted over its layer clusters)"), yaxis: ax("φ")});
+  Plotly.react("graph", traces, layout, {responsive: true});
+}
+
+function bindClicks() {
+  if (clickBound) return;
+  $("graph").on("plotly_click", ev => { const pt = ev.points.find(p => p.customdata !== undefined); if (pt) setFocus({kind: "t", id: D.bp.t[pt.customdata]}); });
+  $("lcplot").on("plotly_click", ev => { const pt = ev.points.find(p => p.customdata !== undefined); if (!pt) return; const i = pt.customdata;
+    if ($("colorBy").value === "k" && D.lc.ts[i] >= 0) setFocus({kind: "k", id: D.lc.ts[i]});
+    else if (D.lc.t[i] >= 0) setFocus({kind: "t", id: D.lc.t[i]}); });
+  clickBound = true;
+}
+
+function ax(title) { return {title, gridcolor: css("--line"), color: css("--muted"), zerolinecolor: css("--line"), backgroundcolor: css("--panel")}; }
+function baseLayout(extra) {
+  return Object.assign({margin: {l: 55, r: 10, t: 10, b: 45}, paper_bgcolor: css("--panel"), plot_bgcolor: css("--panel"),
+    font: {color: css("--ink")}, hovermode: "closest", uirevision: $("event").value + JSON.stringify(focus) + $("side").value + $("view").value}, extra);
+}
+
+// ---------------------------------------------------------------- layer clusters
+function drawLC() {
+  const L = D.lc, view = $("view").value, byK = $("colorBy").value === "k", n = L.x.length;
+  let hi;  // highlighted layer clusters
+  if (focus && focus.kind === "t") {
+    const s = new Set(X.tLC[focus.id]);
+    (D.targets.frags[focus.id]?.[0] ?? []).forEach(k => X.tsLC[k].forEach(i => s.add(i)));
+    hi = s;
+    $("lcNote").textContent = `Layer clusters where t${focus.id} is the largest target, and every trackster holding part of it. Others faint.`;
+  } else if (focus && focus.kind === "k") {
+    const s = new Set(X.tsLC[focus.id]), m = D.tracksters.main[focus.id];
+    if (m >= 0) X.tLC[m].forEach(i => s.add(i));
+    hi = s;
+    $("lcNote").textContent = `Trackster T${focus.id} and the layer clusters led by its main target t${m} (to see what it missed). Others faint.`;
+  } else {
+    hi = null;
+    $("lcNote").textContent = byK ? "Colour = trackster; grey = not in a trackster (outlier or dropped)." :
+      "Colour = target with the most energy in the layer cluster; grey = soft target; faint = no truth energy.";
+  }
+  const proj = view === "proj" ? i => [FRONT * L.x[i] / Math.abs(L.z[i]) + shift(L.z[i]), FRONT * L.y[i] / Math.abs(L.z[i])]
+    : view === "etaphi" ? i => [X.eta[i], X.phi[i]] : view === "side" ? i => [L.z[i], (L.y[i] < 0 ? -1 : 1) * X.rho[i]]
+    : view === "beam" ? i => [L.x[i], L.y[i]] : i => [L.z[i], L.x[i], L.y[i]];
+  const is3d = view === "3d", T = is3d ? "scatter3d" : SC;
+  const bg = {x: [], y: [], z: []}, fg = {x: [], y: [], z: [], c: [], s: [], t: [], i: []};
+  const size = e => Math.max(2, Math.min(10, 3 + 1.6 * Math.log10(e / 0.01))) * (is3d ? 0.7 : 1);
+  const fside = !focus ? 0 : Math.sign(focus.kind === "t" ? D.targets.eta[focus.id] : D.tracksters.eta[focus.id]);
+  for (let i = 0; i < n; ++i) {
+    if (!hi && !sideOk(L.z[i])) continue;
+    if (hi && !hi.has(i) && fside && Math.sign(L.z[i]) !== fside) continue;
+    const q = proj(i);
+    if (hi && !hi.has(i)) { bg.x.push(q[0]); bg.y.push(q[1]); if (is3d) bg.z.push(q[2]); continue; }
+    fg.x.push(q[0]); fg.y.push(q[1]); if (is3d) fg.z.push(q[2]); fg.i.push(i);
+    fg.c.push(byK ? kCol(L.ts[i]) : tCol(L.t[i])); fg.s.push(size(L.E[i]));
+    fg.t.push(`LC ${i}: ${f(L.E[i], 3)} GeV, layer ${L.layer[i]}<br>trackster ${L.ts[i] >= 0 ? "T" + L.ts[i] : "none"}<br>` +
+      (L.t[i] >= 0 ? `largest target ${tName(L.t[i])}: ${pct(L.share[i], 0)}` : "no truth energy") + `, no-truth ${pct(L.nt[i], 0)}`);
+  }
+  const traces = [];
+  if (bg.x.length) traces.push({type: T, mode: "markers", x: bg.x, y: bg.y, z: bg.z, hoverinfo: "skip", showlegend: false,
+    marker: {size: is3d ? 1.5 : 2.5, color: css("--faint"), opacity: 0.35}});
+  traces.push({type: T, mode: "markers", x: fg.x, y: fg.y, z: fg.z, text: fg.t, customdata: fg.i, hoverinfo: "text", showlegend: false,
+    marker: {size: fg.s, color: fg.c, opacity: 0.8, line: {width: 0}}});
+  const names = {proj: [`x/|z| × ${FRONT} cm${projNote()}`, `y/|z| × ${FRONT} cm`], etaphi: ["η", "φ"], side: ["z [cm]", "ρ [cm] (signed by y)"], beam: ["x [cm]", "y [cm]"], "3d": ["z [cm]", "x [cm]", "y [cm]"]}[view];
+  let layout;
+  if (is3d) layout = baseLayout({margin: {l: 0, r: 0, t: 0, b: 0}, scene: {xaxis: ax(names[0]), yaxis: ax(names[1]), zaxis: ax(names[2]), aspectmode: "data"}});
+  else { layout = baseLayout({xaxis: ax(names[0]), yaxis: ax(names[1])});
+    if (view !== "etaphi") layout.yaxis = Object.assign(layout.yaxis, {scaleanchor: "x", scaleratio: 1});
+    if (hi && fg.x.length) { const pad = view === "etaphi" ? 0.15 : view === "proj" ? 5 : 10, r = a => [Math.min(...a) - pad, Math.max(...a) + pad];
+      layout.xaxis.range = r(fg.x); layout.yaxis.range = r(fg.y); } }
+  $("lcTitle").textContent = `Layer clusters (${n} the step may use)`;
+  if (is3d && !GL) $("lcNote").textContent = "3D needs WebGL, which this browser does not provide: use one of the 2D views.";
+  Plotly.react("lcplot", traces, layout, {responsive: true});
+}
+
+// ---------------------------------------------------------------- focus
+function drawFocus() {
+  const box = $("focus");
+  if (!focus) { box.innerHTML = '<span style="color:var(--muted)">Nothing focused. Click a particle in the graph, a layer cluster, or a row below.</span>'; return; }
+  box.innerHTML = focus.kind === "t" ? targetFocus(focus.id) : tracksterFocus(focus.id);
+}
+
+function targetFocus(t) {
+  const Tg = D.targets, B = D.bp, P = D.pairs, S = D.sums, sel = Tg.sel[t];
+  const mem = X.members[t], inters = new Set(mem.map(b => B.inter[b]));
+  const sigE = mem.filter(b => B.sig[b]).reduce((s, b) => s + B.E[b], 0);
+  // strongest particle pairs to other targets (the group-level M decides; this shows which particles touch)
+  const best = new Map();
+  for (const u of mem) for (const p of X.adj[u]) { const v = P.a[p] === u ? P.b[p] : P.a[p], o = B.t[v];
+    if (o !== t && P.M[p] > (best.get(o)?.[0] ?? -1)) best.set(o, [P.M[p], u, v]); }
+  const groupM = new Map(Tg.near[t] ? Tg.near[t][0].map((o, j) => [o, Tg.near[t][1][j]]) : []);
+  // targets to list: by group M where exported (selected targets), else by the strongest particle pair
+  const nearT = groupM.size ? [...groupM.keys()] : [...best].sort((a, b) => b[1][0] - a[1][0]).slice(0, 8).map(([o]) => o);
+  // links inside, and the weakest link still needed: the M of the weakest link in the target
+  let nLinks = 0, minLink = Infinity;
+  for (const u of mem) for (const p of X.adj[u]) if (P.a[p] === u && B.t[P.b[p]] === t && P.M[p] >= D.tau) { nLinks++; minLink = Math.min(minLink, P.M[p]); }
+  const top = mem.slice(0, 8).map(b => `<tr><td class="l">${uName(b)} ${pname(B.pdg[b])}</td><td class="l">${interName(B.inter[b])}</td><td>${f(B.E[b], 3)}</td><td>${f(B.Ein[b], 2)}</td></tr>`).join("");
+  let h = `<h3><span class="sw" style="background:${tCol(t)}"></span>Target t${t}: ${f(Tg.E[t], 2)} GeV reachable${Tg.unreach[t] > 0 ? ` (+ ${f(Tg.unreach[t], 2)} GeV in masked layer clusters)` : ""}</h3>
+    <p>${Tg.n[t]} unit${Tg.n[t] > 1 ? "s" : ""} (fragments of ${new Set(mem.map(b => B.id[b])).size} base particle${new Set(mem.map(b => B.id[b])).size > 1 ? "s" : ""}) from ${inters.size} interaction${inters.size > 1 ? "s" : ""}; ${Tg.sig[t] ? `<b>signal target</b> (signal particles ${f(sigE, 2)} GeV, pileup inside ${f(Tg.pu[t], 2)} GeV)` : "pileup target"}.
+    ${sel ? `<b>Selected</b> (E<sub>t</sub> ≥ ${D.select_energy} GeV): enters C and F.` : `<b>Soft</b> (E<sub>t</sub> &lt; ${D.select_energy} GeV): never in C or F; only lowers the purity of tracksters it joins.`}</p>
+    <div class="grid2"><div>
+    <p><b>Linking.</b> ${nLinks} pair${nLinks === 1 ? "" : "s"} among its members have M ≥ τ = ${D.tau}${nLinks ? ` (weakest ${f(minLink, 3)})` : ""}.
+    ${Tg.n[t] > 1 ? "Groups merge on the M of the groups, so members can have a pairwise M below τ." : ""}
+    <b>Buried</b>: M<sub>rest</sub> = Σ<sub>l</sub> min(its energy, all other energy in l, incl. no truth) / E<sub>t</sub> = <b>${f(Tg.mrest[t], 3)}</b>
+    ${Tg.mrest[t] >= 0.5 ? "≥ 0.5: no trackster of whole layer clusters can hold it with completeness and purity both above 0.5 (whatever the truth grouping)." : "&lt; 0.5: an ideal trackster could hold it individually."}</p>
+    <table><tr><th class="l">largest members (#particle.fragment)</th><th class="l">interaction</th><th>reachable E</th><th>E at boundary</th></tr>${top}</table>
+    ${mem.length > 8 ? `<div class="note">… ${mem.length - 8} more</div>` : ""}</div><div>
+    <p><b>Closest other targets.</b> Group M = M of the two targets as they are now (selected targets only); a value ≥ τ means
+    the relation was settled earlier, between harder groups, before soft particles joined. Max pair M = largest M between one of its
+    particles and one of theirs.</p>
+    <table><tr><th class="l">other target</th><th>its E</th><th>group M</th><th>max pair M</th><th class="l">pair</th></tr>` +
+    (nearT.length ? nearT.map(o => { const pb = best.get(o); return `<tr class="click" data-k="t" data-id="${o}"><td class="l"><span class="sw" style="background:${tCol(o)}"></span>${tName(o)}</td>
+      <td>${f(Tg.E[o], 2)}</td><td>${groupM.has(o) ? f(groupM.get(o), 3) : "–"}</td><td>${pb ? f(pb[0], 3) : "–"}</td><td class="l">${pb ? `${uName(pb[1])} – ${uName(pb[2])}` : ""}</td></tr>`; }).join("")
+      : `<tr><td class="l" colspan="5">no shared layer clusters with M ≥ ${D.pair_floor} (export floor)</td></tr>`) +
+    `</table></div></div>`;
+  const fr = Tg.frags[t];
+  if (!sel) return h;
+  const clustered = Tg.clustered[t];
+  if (!fr || !fr[0].length) return h + `<div class="calc">Not in any trackster: C<sub>t</sub> = 0, contributes 0 to the numerator of C and ${f(Tg.E[t], 2)} GeV to its denominator; outcome <b>lost</b>.</div>`;
+  const rows = fr[0].map((k, j) => { const e = fr[1][j], ft = e / clustered;
+    return `<tr class="click" data-k="k" data-id="${k}"><td class="l"><span class="sw" style="background:${kCol(k)}"></span>T${k}</td><td>${f(e, 3)}</td><td>${pct(e / Tg.E[t])}</td>
+      <td>${f(ft, 3)}</td><td>${f(ft * ft, 4)}</td><td>${f(D.tracksters.E[k], 2)}</td><td>${pct(e / D.tracksters.E[k])}</td>
+      <td class="l">${D.tracksters.main[k] === t ? "main target" : `main is ${tName(D.tracksters.main[k])}`}</td></tr>`; }).join("");
+  const sumf2 = fr[1].reduce((s, e) => s + (e / clustered) ** 2, 0);
+  const k0 = Tg.best_k[t], e0 = Tg.best[t], E0 = D.tracksters.E[k0];
+  const oc = ["individual", "split", "lost"][Tg.outcome[t]];
+  return h + `<p><b>Tracksters holding it</b> (e(t,k) = Σ<sub>l∈k</sub> T(l,t)):</p>
+    <table><tr><th class="l">trackster</th><th>e(t,k) GeV</th><th>of E<sub>t</sub></th><th>f<sub>tk</sub></th><th>f<sub>tk</sub>²</th><th>E<sub>k</sub></th><th>t's share of E<sub>k</sub></th><th class="l"></th></tr>${rows}</table>
+    <div class="calc"><b>C</b>: best trackster T${k0} holds ${f(e0, 3)} of ${f(Tg.E[t], 3)} GeV → C<sub>t</sub> = ${f(e0 / Tg.E[t], 3)}.
+      Adds ${f(e0, 2)} GeV to the numerator (${pct(e0 / S.sel_best)} of it) and ${f(Tg.E[t], 2)} GeV to the denominator (${pct(Tg.E[t] / S.sel_E)} of it).<br>
+      <b>F</b>: clustered Σ<sub>k</sub> e(t,k) = ${f(clustered, 3)} GeV (unclustered ${f(Tg.E[t] - clustered, 3)} GeV); N<sub>frag</sub> = 1/Σf² = 1/${f(sumf2, 4)} = <b>${f(Tg.nfrag[t], 3)}</b>,
+      weighted by E<sub>t</sub> (${pct(Tg.E[t] / S.sel_frag_den)} of the F weight).<br>
+      <b>Outcome</b>: <b>${oc}</b> — individual if some trackster has e &gt; ${D.individual_frac}·E<sub>t</sub> (${f(D.individual_frac * Tg.E[t], 2)}) and e &gt; ${D.individual_frac}·E<sub>k</sub>
+      (T${k0}: ${f(e0, 2)} vs ${f(D.individual_frac * Tg.E[t], 2)} and ${f(D.individual_frac * E0, 2)}); else split if the tracksters it leads hold ≥ ${D.split_frac}·E<sub>t</sub>; else lost.</div>`;
+}
+
+function tracksterFocus(k) {
+  const K = D.tracksters, Tg = D.targets, S = D.sums, Ek = K.E[k];
+  const [ts, es] = K.comp[k], listed = es.reduce((a, b) => a + b, 0), rest = Ek - K.notruth[k] - listed;
+  const rows = ts.map((t, j) => `<tr class="click" data-k="t" data-id="${t}"><td class="l"><span class="sw" style="background:${tCol(t)}"></span>${tName(t)}</td>
+    <td class="l">${Tg.sel[t] ? "selected" : "soft"}</td><td>${f(Tg.E[t], 2)}</td><td>${f(es[j], 3)}</td><td>${pct(es[j] / Ek)}</td><td>${es[j] >= D.merge_frac * Ek ? "≥ " + D.merge_frac * 100 + "%" : ""}</td>
+    <td>${pct(es[j] / Tg.E[t])}</td></tr>`).join("");
+  const m = K.main[k], scored = K.sel[k];
+  const nSig = es.filter(e => e >= D.merge_frac * Ek).length;
+  return `<h3><span class="sw" style="background:${kCol(k)}"></span>Trackster T${k}: E<sub>k</sub> = ${f(Ek, 3)} GeV, ${K.nlc[k]} layer clusters</h3>
+    <p>E<sub>k</sub> = Σ<sub>t</sub> e(t,k) + no-truth energy. Its targets, largest first:</p>
+    <table><tr><th class="l">target</th><th class="l"></th><th>E<sub>t</sub></th><th>e(t,k) GeV</th><th>of E<sub>k</sub></th><th>merge</th><th>of the target</th></tr>${rows}
+    ${rest > 1e-4 ? `<tr><td class="l">smaller targets</td><td></td><td></td><td>${f(rest, 3)}</td><td>${pct(rest / Ek)}</td><td></td><td></td></tr>` : ""}
+    <tr><td class="l">no truth (out-of-time PU, noise)</td><td></td><td></td><td>${f(K.notruth[k], 3)}</td><td>${pct(K.notruth[k] / Ek)}</td><td></td><td></td></tr></table>
+    <div class="calc">${m < 0 ? "No truth energy: not scored in P." :
+      `Main target ${tName(m)} (${Tg.sel[m] ? "selected" : "soft"}): purity e<sub>main</sub>/E<sub>k</sub> = ${f(K.e_main[k], 3)} / ${f(Ek, 3)} = <b>${f(K.e_main[k] / Ek, 3)}</b>.<br>
+      ${scored ? `Scored in P: adds ${f(K.e_main[k], 2)} GeV to the numerator and ${f(Ek, 2)} GeV to the denominator (${pct(Ek / S.selts_E)} of it).
+        The rest of E<sub>k</sub> lowers P: other selected targets ${f(K.other_sel[k], 3)}, soft targets ${f(K.soft[k], 3)}, no truth ${f(K.notruth[k], 3)} GeV.`
+        : "Not scored in P: its main target is soft."}`}<br>
+      Merge: ${nSig} target${nSig === 1 ? "" : "s"} with ≥ ${D.merge_frac * 100}% of E<sub>k</sub> → ${K.merge[k] ? "<b>merge</b>" : "not a merge"}.
+      Fake: no truth ${pct(K.notruth[k] / Ek)} ${K.fake[k] ? "≥" : "&lt;"} ${D.fake_frac * 100}% → ${K.fake[k] ? "<b>fake</b>" : "not fake"}.</div>`;
+}
+
+// ---------------------------------------------------------------- tables
+function drawTargets() {
+  const Tg = D.targets, S = D.sums, oc = ["individual", "split", "lost"];
+  const rows = X.selT.filter(t => sideOk(Tg.eta[t]));
+  $("tTitle").textContent = `Selected targets (${rows.length}${+$("side").value ? " in this endcap" : ""})`;
+  $("tNote").textContent = "Share = this target's part of the C and F denominator Σ E_t over the event's selected targets. C_t = best e(t,k) / E_t. " +
+    "M_rest ≥ 0.5 (red): buried in other energy, no trackster of whole layer clusters can hold it individually.";
+  $("tTable").innerHTML = `<table><tr><th class="l">target</th><th>E<sub>t</sub> GeV</th><th>share</th><th>particles</th><th>interactions</th><th>η</th>
+    <th>best trackster</th><th>e best</th><th>C<sub>t</sub></th><th>clustered</th><th>N<sub>frag</sub></th><th class="l">outcome</th><th>M<sub>rest</sub></th><th>pileup inside</th><th>unreachable</th></tr>` +
+    rows.slice(0, MAX_ROWS).map(t => `<tr class="click${focus?.kind === "t" && focus.id === t ? " on" : ""}" data-k="t" data-id="${t}">
+      <td class="l"><span class="sw" style="background:${tCol(t)}"></span>${tName(t)}</td><td>${f(Tg.E[t], 2)}</td><td>${pct(Tg.E[t] / S.sel_E)}</td>
+      <td>${Tg.n[t]}</td><td>${Tg.ninter[t]}</td><td>${f(Tg.eta[t], 2)}</td><td>${Tg.best_k[t] >= 0 && Tg.best[t] > 0 ? "T" + Tg.best_k[t] : "–"}</td>
+      <td>${f(Tg.best[t], 2)}</td><td>${f(Tg.best[t] / Tg.E[t], 3)}</td><td>${pct(Tg.clustered[t] / Tg.E[t])}</td><td>${f(Tg.nfrag[t], 2)}</td>
+      <td class="l">${oc[Tg.outcome[t]]}</td><td${Tg.mrest[t] >= 0.5 ? ' style="color:var(--nolink)"' : ""}>${f(Tg.mrest[t], 2)}</td><td>${f(Tg.pu[t], 2)}</td><td>${f(Tg.unreach[t], 2)}</td></tr>`).join("") + "</table>";
+}
+
+function drawTracksters() {
+  const K = D.tracksters, S = D.sums;
+  const rows = X.ts.filter(k => sideOk(K.eta[k]));
+  $("kTitle").textContent = `Tracksters (${rows.length}${+$("side").value ? " in this endcap" : ""})`;
+  $("kNote").textContent = "Purity = e(main,k)/E_k. Scored = main target is selected (enters P). Other selected / soft / no truth are the parts of E_k that lower P.";
+  $("kTable").innerHTML = `<table><tr><th class="l">trackster</th><th>E<sub>k</sub> GeV</th><th>layer clusters</th><th>η</th><th class="l">main target</th><th>purity</th>
+    <th>other selected</th><th>soft</th><th>no truth</th><th class="l">scored</th><th class="l">flags</th></tr>` +
+    rows.slice(0, MAX_ROWS).map(k => { const m = K.main[k], E = K.E[k];
+      return `<tr class="click${focus?.kind === "k" && focus.id === k ? " on" : ""}" data-k="k" data-id="${k}">
+      <td class="l"><span class="sw" style="background:${kCol(k)}"></span>T${k}</td><td>${f(E, 2)}</td><td>${K.nlc[k]}</td><td>${f(K.eta[k], 2)}</td>
+      <td class="l">${m >= 0 ? `<span class="sw" style="background:${tCol(m)}"></span>${tName(m)} ${D.targets.sel[m] ? "" : "(soft)"}` : "none"}</td>
+      <td>${f(K.e_main[k] / E, 3)}</td><td>${pct(K.other_sel[k] / E)}</td><td>${pct(K.soft[k] / E)}</td><td>${pct(K.notruth[k] / E)}</td>
+      <td class="l">${K.sel[k] ? "yes" : ""}</td><td class="l">${[K.merge[k] ? "merge" : "", K.fake[k] ? "fake" : ""].filter(Boolean).join(", ")}</td></tr>`; }).join("") + "</table>";
+}
+
+init();
+</script>
+</body>
+</html>
