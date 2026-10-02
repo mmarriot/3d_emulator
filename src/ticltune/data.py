@@ -16,6 +16,7 @@ SIGMA_INDEX = {8: 0, 9: 1, 10: 2}
 
 LC_FIELDS = ("E", "x", "y", "z", "layer", "side", "det", "nhits", "algo", "seed", "mask", "noTruthE", "recE")
 BP_FIELDS = ("id", "pdg", "signal", "bx", "evt", "kind", "origin", "originPdg", "originE", "E", "eta", "phi", "simE")
+RH_FIELDS = ("E", "x", "y", "z", "layer", "det", "lc")  # rechits in layer clusters (newer ntuples only)
 
 
 @dataclass
@@ -64,6 +65,10 @@ class Event:
     bp: Dict[str, np.ndarray]            # BP_FIELDS
     clue_assignment: Optional[np.ndarray] = None
     cmssw: Dict[str, Tracksters] = field(default_factory=dict)
+    rh: Optional[Dict[str, np.ndarray]] = None  # RH_FIELDS; lc = the layer cluster holding most of the rechit
+    trh_rh: Optional[np.ndarray] = None         # rechit truth table: rechit index
+    trh_bp: Optional[np.ndarray] = None         #                     base-particle row
+    trh_E: Optional[np.ndarray] = None          #                     E_rechit * share of the in-time sim energy [GeV]
     _cache: dict = field(default_factory=dict, repr=False)
 
     @property
@@ -77,6 +82,11 @@ class Event:
     def eligible(self):
         """Layer clusters the trackster-building step may use: HGCAL, and passing its iteration mask."""
         return (self.lc["mask"] > 0) & np.isin(self.lc["det"], HGCAL_DETECTORS)
+
+    def rh_eligible(self):
+        """Rechits of the layer clusters the step may use."""
+        lc = self.rh["lc"]
+        return (lc >= 0) & self.eligible()[np.maximum(lc, 0)]
 
     def lc_energy(self):
         """Layer-cluster energy decomposed into truth + no-truth (= sum of fraction * rechit energy),
@@ -103,8 +113,13 @@ def load(path, tree="tracksterTruthNtuplizer/events", max_events=0, entry_start=
             cmssw[nm] = Tracksters(np.asarray(a[f"ts_{nm}_E"][i]), np.concatenate([[0], np.cumsum(nlc)]),
                                    np.asarray(a[f"ts_{nm}_lc"][i], dtype=np.int64),
                                    np.where(mult > 0, 1.0 / np.maximum(mult, 1e-9), 1.0))
+        rh = {}
+        if "rh_E" in a:
+            rh = dict(rh={f: np.asarray(a[f"rh_{f}"][i]) for f in RH_FIELDS},
+                      trh_rh=np.asarray(a["trh_rh"][i], dtype=np.int64), trh_bp=np.asarray(a["trh_bp"][i], dtype=np.int64),
+                      trh_E=np.asarray(a["trh_E"][i], dtype=np.float64))
         events.append(Event(int(a["run"][i]), int(a["lumi"][i]), int(a["event"][i]), lc,
                             np.asarray(a["tr_lc"][i], dtype=np.int64), np.asarray(a["tr_bp"][i], dtype=np.int64),
                             np.asarray(a["tr_E"][i], dtype=np.float64), bp,
-                            np.asarray(a["clue_assignment"][i]) if "clue_assignment" in a else None, cmssw))
+                            np.asarray(a["clue_assignment"][i]) if "clue_assignment" in a else None, cmssw, **rh))
     return events

@@ -44,6 +44,15 @@ def test_endcaps_never_mix(mk):
     assert lab[0] == lab[1] and lab[2] == lab[3] and lab[0] != lab[2]
 
 
+def test_neighbour_exactly_dc_away_is_rounded_as_cmssw(mk):
+    # dc * layerScale = 6 layers, so the 6-layer neighbour sits on the dc boundary and float rounding
+    # of CMSSW's layer coordinate decides; expected values from that arithmetic (float32, GPU fma)
+    for z, l, inside in [(-350, 1, True), (-350, 2, False), (350, 1, True), (350, 13, False)]:
+        ev = mk(2, [(0, 0, 1.0), (1, 0, 1.0)], [{}], positions=[[150, 0, z], [150, 0, z]], layers=[l, l + 6])
+        pr = clue._pairs(ev, np.arange(2), clue.DEFAULT, cache_key=0)
+        assert bool(np.any(pr["D"] <= clue.DEFAULT.dc)) == inside, (z, l)
+
+
 def test_compare_ignores_label_numbering():
     a = np.array([0, 0, 1, 1, -1])
     b = np.array([7, 7, 3, 3, -1])

@@ -2,7 +2,8 @@
 
 Follows, line by line where it matters for the result:
   RecoHGCal/TICL/plugins/alpaka/TracksterCLUEsteringAlgoWrapper.dev.cc
-      gnomonic coordinates x/|z|, y/|z| in units of the smallest sigmaT; z = layer / layerScale;
+      gnomonic coordinates x/|z|, y/|z| in units of the smallest sigmaT; z = layer / layerScale with
+      CMSSW's layer index and float rounding (see _pairs);
       cylinder metric max(|dxy| * 2 / (rel_i + rel_j), |dz|); rhoc_i = rhoc * (pivot / r_i)^alpha;
       tie-break tag = the layer cluster's seed DetId; the two endcaps never interact.
   CLUEstering 2.12 core/detail/ClusteringKernels.hpp, FlatKernel(0.5)
@@ -74,6 +75,9 @@ class Params:
 
 DEFAULT = Params()
 
+# layers per endcap (rhtools lastLayer, D128): the + side offset of the rechit-SoA layer index
+LAST_LAYER = 47
+
 
 def _f(a, f32):
     return np.asarray(a, np.float32) if f32 else np.asarray(a, np.float64)
@@ -84,7 +88,7 @@ def _pairs(ev, side_idx, p, cache_key):
     distances. Cached per event and coordinate setup, since only the thresholds change between
     most settings."""
     key = (cache_key, p.sigmaT, p.layerScale, p.eta_shrink, p.eta_shrink_pivot, p.sigma_cm, p.depth, p.f32,
-           max(p.outlierDistance, p.seedingDistance, p.dc))
+           max(p.outlierDistance, p.seedingDistance, p.dc), max(p.dc, p.outlierDistance))
     hit = ev._cache.get(("pairs", cache_key))
     if hit is not None and hit[0] == key:
         return hit[1]
@@ -105,9 +109,20 @@ def _pairs(ev, side_idx, p, cache_key):
     r = np.hypot(gx, gy)
     if p.eta_shrink:
         rel = rel * np.minimum(1.0, (r / p.eta_shrink_pivot) ** p.eta_shrink).astype(rel.dtype)
-    X, Y = gx / sref, gy / sref
-    zl = layer.astype(np.float64) if p.depth is None else np.asarray(p.depth, float)[layer - 1]
-    Z = _f(zl, f32) * _f(1.0 / p.layerScale, f32)
+    inv_sref = _f(1.0, f32) / sref  # CMSSW multiplies by the inverse: same rounding
+    X, Y = gx * inv_sref, gy * inv_sref
+    if p.depth is None:
+        # CMSSW's layer coordinate, bit for bit: the rechit-SoA layer (0-based, + side offset by the last
+        # layer) / layerScale, plus a gap on the + side, fused into one multiply-add on the GPU. dc *
+        # layerScale is a whole number of layers, so whether a neighbour exactly dc away counts depends
+        # on this rounding.
+        side = lc["side"][side_idx]
+        zl = _f(layer - 1 + side * LAST_LAYER, f32)
+        gap = np.where(side == 1, _f(2.0, f32) * _f(max(p.dc, p.outlierDistance), f32), _f(0.0, f32))
+        # float32 fma: the float64 product of two float32 is exact
+        Z = _f(zl.astype(np.float64) * np.float64(_f(1.0, f32) / _f(p.layerScale, f32)) + gap, f32)
+    else:
+        Z = _f(np.asarray(p.depth, float)[layer - 1], f32) * _f(1.0 / p.layerScale, f32)
     rmax = max(p.outlierDistance, p.seedingDistance, p.dc)
     # Superset search in coordinates where the metric never shrinks a distance: scale the transverse
     # axes by the largest relative sigma, so |dxy|/relmax <= metric transverse distance.

@@ -2,7 +2,7 @@
 
     data     events from the CMSSW truth ntuple (TruthMetrics/Ntuple)
     clue     the CLUEstering trackster-building emulation -> one label per layer cluster
-    truth    base particles -> inseparability M -> targets(tau)
+    truth    base particles -> targets: what an ideal clustering could reconstruct on its own
     metrics  completeness C, purity P, fragmentation F and every diagnostic, as additive sums
     closure  emulator vs CMSSW, compared as partitions
 """
