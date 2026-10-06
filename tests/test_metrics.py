@@ -1,343 +1,204 @@
-"""Each test is one property the metrics must have."""
+"""The metrics (V3_TRUTH_AND_METRICS.md section 6): each test is one clustering of a toy event with the values the
+definitions give by hand."""
 import numpy as np
 import pytest
+import scipy.sparse as sp
 
 from ticltune import metrics, truth
 from ticltune.data import Tracksters
 
+PU = dict(signal=0, evt=1)
 
-def score(ev, labels, **cfg):
-    # the property tests use toy energies of a few GeV: select every target unless a test says
-    # otherwise. The 5 GeV selection itself is tested in its own section below.
-    cfg.setdefault("select_energy", 0.0)
+
+def run(ev, labels, level="rh"):
+    return metrics.summary(metrics.score(ev, np.asarray(labels), level))
+
+
+def same(a, b):
+    """Two summaries are equal (nan == nan)."""
+    return a.keys() == b.keys() and all(np.isclose(a[k], b[k], equal_nan=True, rtol=1e-12) for k in a)
+
+
+def two_particles(mk):
+    # signal a (rechits 0, 1: 2 + 2 GeV), signal b (rechits 2, 3: 1 + 3 GeV), both hadrons
+    return mk(4, [(0, 0, 2.0), (1, 0, 2.0), (2, 1, 1.0), (3, 1, 3.0)])
+
+
+def test_perfect_clustering(mk):
+    s = run(two_particles(mk), [0, 0, 1, 1])
+    assert (s["eps_sig"], s["K_sig"], s["Phi_sig"]) == pytest.approx((1, 0, 0))
+
+
+def test_pure_fragments_keep_efficiency_and_are_charged_as_surplus(mk):
+    # a in two pieces (2 + 2), b in one: c = (4, 4), N = (2, 1) -> Phi = 1 - 8 / (8 + 4) = 1/3
+    s = run(two_particles(mk), [0, 1, 2, 2])
+    assert (s["eps_sig"], s["K_sig"]) == pytest.approx((1, 0)) and s["Phi_sig"] == pytest.approx(1 / 3)
+
+
+def test_shattering_reaches_the_ideal_values_and_maximal_fragmentation(mk):
+    s = run(two_particles(mk), [0, 1, 2, 3])
+    assert (s["eps_sig"], s["K_sig"]) == pytest.approx((1, 0)) and s["Phi_sig"] == pytest.approx(0.5)
+
+
+def test_one_blob_credits_only_its_best_target(mk):
+    # everything in one object: best target a (4 of 8), b gets nothing
+    s = run(two_particles(mk), [0, 0, 0, 0])
+    assert s["K_sig"] == pytest.approx(0.5) and s["eps_sig"] == pytest.approx(0.5) and s["Phi_sig"] == 0
+    assert s["lost_other_HAD"] == pytest.approx(0.5)
+
+
+def test_empty_clustering(mk):
+    s = run(two_particles(mk), [-1, -1, -1, -1])
+    assert (s["eps_sig"], s["K_sig"], s["Phi_sig"]) == (0.0, 1.0, 0.0)
+    assert s["lost_none_HAD"] == pytest.approx(1)
+
+
+def test_pileup_in_a_signal_object_is_contamination(mk):
+    # object 0: signal a (3) + pileup (1) -> K = 1/4; a fully collected
+    ev = mk(2, [(0, 0, 3.0), (1, 1, 1.0)], units=[{}, PU])
+    s = run(ev, [0, 0])
+    assert s["K_sig"] == pytest.approx(0.25) and s["eps_sig"] == pytest.approx(1)
+
+
+def test_no_truth_energy_is_contamination(mk):
+    ev = mk(2, [(0, 0, 3.0)], no_truth=[0.0, 1.0])
+    assert run(ev, [0, 0])["K_sig"] == pytest.approx(0.25)
+
+
+def test_assignment_is_by_plurality(mk):
+    # one rechit: signal a 0.3, three pileup particles 0.25 / 0.25 / 0.2 (different collisions, never merged):
+    # a has the most -> a signal object with K = 0.7
+    ev = mk(1, [(0, 0, 0.3), (0, 1, 0.25), (0, 2, 0.25), (0, 3, 0.2)],
+            units=[{}, dict(signal=0, evt=1), dict(signal=0, evt=2), dict(signal=0, evt=3)])
+    s = run(ev, [0])
+    assert s["K_sig"] == pytest.approx(0.7) and s["signal_objects_per_event"] == 1
+
+
+def test_signal_in_a_pileup_object_is_lost_and_counted_in_K_pu(mk):
+    # object: pileup 0.6 + signal a 0.4 -> a pileup object: a's 0.4 is an efficiency loss, K_pu = 0.4
+    ev = mk(2, [(0, 1, 0.6), (1, 0, 0.4), (1, 1, 0.0)], units=[{}, PU])
+    s = run(ev, [0, 0])
+    assert s["eps_sig"] == 0 and s["K_pu"] == pytest.approx(0.4) and s["K_sig"] == 1.0
+    assert s["pileup_objects_per_event"] == 1
+
+
+def test_noise_objects_are_unassigned_and_change_nothing(mk):
+    ev = mk(3, [(0, 0, 2.0), (1, 0, 2.0)], no_truth=[0, 0, 5.0])
+    a, b = run(ev, [0, 0, -1]), run(ev, [0, 0, 1])
+    assert b["noise_objects_per_event"] == 1
+    assert (a["eps_sig"], a["K_sig"], a["Phi_sig"]) == (b["eps_sig"], b["K_sig"], b["Phi_sig"])
+
+
+def test_ties_go_to_the_larger_target_then_the_lower_index(mk):
+    # one object holds 1 GeV of a (deposited 1) and 1 GeV of b (pileup, deposited 3): b wins
+    ev = mk(3, [(0, 0, 1.0), (0, 1, 1.0), (1, 1, 2.0)], units=[{}, PU])
+    best, own, _ = metrics.assign(metrics.objects(ev, np.array([0, -1, -1]), "rh"), truth.build(ev))
+    assert list(best) == [1] and own[0] == pytest.approx(1)
+    ev = mk(1, [(0, 0, 1.0), (0, 1, 1.0)], units=[dict(signal=0, evt=1), dict(signal=0, evt=2)])
+    assert list(metrics.assign(metrics.objects(ev, np.array([0]), "rh"), truth.build(ev))[0]) == [0]
+
+
+def test_classes_are_averaged(mk):
+    # an EM target perfectly clustered, a hadron half collected: eps = (1 + 0.5) / 2
+    ev = mk(3, [(0, 0, 2.0), (1, 1, 1.0), (2, 1, 1.0)], units=[dict(pdg=22), {}])
+    s = run(ev, [0, 1, -1])
+    assert s["eps_EM"] == 1 and s["eps_HAD"] == pytest.approx(0.5) and s["eps_sig"] == pytest.approx(0.75)
+
+
+def test_cell_floor_of_contamination(mk):
+    # a rechit shared 3 (a) / 1 (pileup): any object holding it carries 1 GeV of contamination
+    ev = mk(2, [(0, 0, 3.0), (0, 1, 1.0), (1, 0, 4.0)], units=[{}, PU])
+    s = run(ev, [0, 0])
+    assert s["K_HAD"] == pytest.approx(1 / 8) and s["K_floor_HAD"] == pytest.approx(1 / 8)
+
+
+def test_layer_cluster_level_equals_rechit_level(mk):
+    # layer clusters with shared rechits: scoring a layer-cluster clustering through the fractions equals scoring
+    # the same rechit fractions directly
+    lcs = [[(0, 1.0), (1, 0.7)], [(1, 0.3), (2, 1.0)], [(3, 1.0)]]
+    ev = mk(4, [(0, 0, 2.0), (1, 0, 1.0), (1, 1, 1.0), (2, 1, 2.0), (3, 2, 1.0)], units=[{}, {}, PU], lcs=lcs)
     t = truth.build(ev)
-    d = metrics.evaluate(ev, Tracksters.from_labels(labels, ev.lc_energy()), t, metrics.MetricConfig(**cfg),
-                         keep_details=True)
-    return metrics.summary(d["sums"]), d
-
-
-@pytest.fixture
-def two_separable(mk):
-    # two signal particles, never in the same layer cluster
-    return mk(4, [(0, 0, 5.0), (1, 0, 5.0), (2, 1, 3.0), (3, 1, 3.0)], [{}, {}])
-
-
-def test_perfect_reconstruction(two_separable):
-    s, d = score(two_separable, [0, 0, 1, 1])
-    assert s["sel_C"] == pytest.approx(1) and s["sel_P"] == pytest.approx(1) and s["sel_F"] == pytest.approx(1)
-    assert s["sel_eff_individual"] == 1 and s["selts_merge_rate"] == 0
-
-
-def test_merging_separable_targets_costs_purity_not_completeness(two_separable):
-    s, d = score(two_separable, [0, 0, 0, 0])
-    assert s["sel_C"] == pytest.approx(1)
-    assert s["sel_P"] == pytest.approx(10 / 16)            # main target 10 of 16 GeV
-    assert s["selts_merge_rate"] == 1
-    assert s["selts_other_sel_frac"] == pytest.approx(6 / 16)
-
-
-def test_splitting_costs_completeness_and_shows_in_fragmentation(mk):
-    ev = mk(2, [(0, 0, 4.0), (1, 0, 4.0)], [{}])
-    s, d = score(ev, [0, 1])
-    assert s["sel_C"] == pytest.approx(0.5) and s["sel_P"] == pytest.approx(1) and s["sel_F"] == pytest.approx(2)
-    assert s["sel_split_rate"] == 1 and s["sel_eff_individual"] == 0
-
-
-def test_crumbs_are_cheap_in_energy(mk):
-    ev = mk(3, [(0, 0, 9.8), (1, 0, 0.1), (2, 0, 0.1)], [{}])
-    s, _ = score(ev, [0, 1, 2])
-    assert s["sel_C"] == pytest.approx(0.98) and 1 < s["sel_F"] < 1.05
-
-
-def test_inseparable_merge_is_not_penalised(mk):
-    # particle 1 embedded in particle 0: one target, so one trackster is perfect
-    ev = mk(2, [(0, 0, 8.0), (0, 1, 0.5), (1, 0, 2.0)], [{}, {"origin": 7}])
-    s, _ = score(ev, [0, 0])
-    assert s["sel_P"] == pytest.approx(1) and s["selts_merge_rate"] == 0 and s["sel_multi_origin_frac"] == 1
-
-
-def test_inseparable_pileup_is_reported_not_penalised(mk):
-    ev = mk(2, [(0, 0, 8.0), (0, 1, 0.5), (1, 0, 2.0)], [{"signal": 1}, {"signal": 0, "evt": 12}])
-    s, _ = score(ev, [0, 0])
-    assert s["sel_P"] == pytest.approx(1) and s["sig_pileup_inside_frac"] == pytest.approx(0.5 / 10.5)
-
-
-def test_separable_pileup_merged_into_signal_costs_signal_purity(mk):
-    ev = mk(3, [(0, 0, 6.0), (1, 0, 4.0), (2, 1, 2.0)], [{"signal": 1}, {"signal": 0, "evt": 5}])
-    s, _ = score(ev, [0, 0, 0])
-    assert s["sig_P"] == pytest.approx(10 / 12) and s["sigts_pileup_frac"] == pytest.approx(2 / 12)
-    assert s["sig_C"] == pytest.approx(1)
-
-
-def test_no_truth_energy_costs_purity_and_makes_fakes(mk):
-    ev = mk(3, [(0, 0, 6.0), (1, 0, 4.0)], [{}], no_truth=[0, 0, 5.0])
-    s, d = score(ev, [0, 0, 0])
-    assert s["sel_P"] == pytest.approx(10 / 15) and s["selts_notruth_frac"] == pytest.approx(5 / 15)
-    s2, d2 = score(ev, [0, 0, 1])     # the no-truth cluster on its own is a fake trackster
-    assert s2["sel_P"] == pytest.approx(1) and d2["sums"]["ts_fake"] == 1
-
-
-def test_unclustered_energy_costs_completeness(mk):
-    ev = mk(3, [(0, 0, 6.0), (1, 0, 3.0), (2, 0, 1.0)], [{}])
-    s, _ = score(ev, [0, 0, -1])
-    assert s["sel_C"] == pytest.approx(0.9) and s["sel_unclustered_frac"] == pytest.approx(0.1)
-
-
-def test_trackster_weights_share_a_layer_cluster(mk):
-    ev = mk(2, [(0, 0, 4.0), (1, 0, 4.0)], [{}])
-    ts = Tracksters(np.zeros(2), np.array([0, 2, 3]), np.array([0, 1, 1]), np.array([1.0, 0.5, 0.5]))
-    d = metrics.evaluate(ev, ts, truth.build(ev), keep_details=True)
-    assert d["tracksters"]["E"] == pytest.approx([6.0, 2.0])
-
-
-def test_sums_are_additive(two_separable, mk):
-    # default config: every target here (10, 6, 8 GeV) is above 5 GeV
-    ev2 = mk(2, [(0, 0, 4.0), (1, 0, 4.0)], [{}])
-    a = metrics.evaluate(two_separable, Tracksters.from_labels([0, 0, 0, 0]), truth.build(two_separable))
-    b = metrics.evaluate(ev2, Tracksters.from_labels([0, 1]), truth.build(ev2))
-    c = metrics.combine([a, b])
-    assert c["sel_E"] == pytest.approx(a["sel_E"] + b["sel_E"]) and c["sel_n"] == 3
-    assert metrics.summary(c)["sel_C"] == pytest.approx((a["sel_best"] + b["sel_best"]) / (a["sel_E"] + b["sel_E"]))
-
-
-def test_no_tracksters_at_all(two_separable):
-    s, _ = score(two_separable, [-1, -1, -1, -1])
-    assert s["sel_C"] == 0 and np.isnan(s["sel_P"]) and s["sel_lost_rate"] == 1
-
-
-# ---- selection: targets with E_t >= 5 GeV are scored, the rest is noise ----
-
-SEL = dict(select_energy=5.0)
-
-
-def test_default_selection_is_5_GeV_and_objectives_2_GeV():
-    assert metrics.MetricConfig().select_energy == 5.0 and metrics.MetricConfig().objective_energy == 2.0
-
-
-def test_selection_is_on_the_target_after_linking(mk):
-    # particles 0 and 1 (3 GeV each) are inseparable: one 6 GeV target, selected although
-    # neither particle passes alone. Particle 2 sits exactly at the cut, particle 3 below it.
-    ev = mk(4, [(0, 0, 2.0), (0, 1, 2.0), (1, 0, 1.0), (1, 1, 1.0), (2, 2, 5.0), (3, 3, 4.0)], [{}, {}, {}, {}])
-    s, d = score(ev, [0, 0, 1, 2], **SEL)
-    E, sel = d["targets"]["E"], d["targets"]["selected"]
-    assert sorted(E[sel]) == pytest.approx([5.0, 6.0]) and list(E[~sel]) == pytest.approx([4.0])
-    assert s["sel_energy_frac"] == pytest.approx(11 / 15)
-
-
-def test_selection_uses_reachable_energy(mk):
-    # particle 0 has 10 GeV, but 6 of it is in a masked layer cluster: 4 GeV reachable, not selected
-    ev = mk(3, [(0, 0, 4.0), (1, 0, 6.0), (2, 1, 6.0)], [{}, {}], mask=[1, 0, 1])
-    s, d = score(ev, [0, -1, 1], **SEL)
-    assert d["sums"]["sel_n"] == 1 and d["sums"]["sel_E"] == pytest.approx(6.0)
-
-
-def test_soft_inseparable_particle_is_part_of_the_hard_target(mk):
-    # a 1 GeV pileup particle embedded in a 20 GeV one: no contamination
-    ev = mk(2, [(0, 0, 16.0), (0, 1, 1.0), (1, 0, 4.0)], [{"signal": 1}, {"signal": 0, "evt": 9}])
-    s, _ = score(ev, [0, 0], **SEL)
-    assert s["sel_P"] == pytest.approx(1) and s["selts_soft_frac"] == 0
-    assert s["sel_pileup_inside_frac"] == pytest.approx(1 / 21)
-
-
-def test_soft_separable_target_merged_costs_purity_only(mk):
-    ev = mk(3, [(0, 0, 12.0), (1, 0, 8.0), (2, 1, 2.0)], [{"signal": 1}, {"signal": 0, "evt": 4}])
-    s, _ = score(ev, [0, 0, 0], **SEL)
-    assert s["sel_C"] == pytest.approx(1) and s["sel_P"] == pytest.approx(20 / 22)
-    assert s["selts_soft_frac"] == pytest.approx(2 / 22) and s["selts_other_sel_frac"] == 0
-
-
-def test_soft_targets_do_not_enter_completeness_or_fragmentation(mk):
-    # a perfect 10 GeV target next to a 4 GeV one split in two
-    ev = mk(4, [(0, 0, 6.0), (1, 0, 4.0), (2, 1, 2.0), (3, 1, 2.0)], [{}, {}])
-    s, d = score(ev, [0, 0, 1, 2], **SEL)
-    assert s["sel_C"] == pytest.approx(1) and s["sel_F"] == pytest.approx(1) and s["sel_P"] == pytest.approx(1)
-    assert s["all_C"] == pytest.approx(12 / 14)   # but they are monitored
-
-
-def test_tracksters_led_by_a_soft_target_are_not_scored(mk):
-    # 2 of the 10 GeV target end up in a trackster whose main target is the 4 GeV one:
-    # that trackster is not in P; the hard target pays in C and F
-    ev = mk(3, [(0, 0, 8.0), (1, 0, 2.0), (2, 1, 4.0)], [{}, {}])
-    s, d = score(ev, [0, 1, 1], **SEL)
-    assert d["sums"]["selts_n"] == 1 and d["sums"]["ts_n"] == 2
-    assert s["sel_P"] == pytest.approx(1) and s["sel_C"] == pytest.approx(0.8)
-    assert s["sel_F"] == pytest.approx(1 / (0.8 ** 2 + 0.2 ** 2))
-
-
-def test_hard_pileup_is_scored_like_signal(mk):
-    # a perfect 10 GeV signal target next to a 6 GeV pileup target split in two
-    ev = mk(4, [(0, 0, 5.0), (1, 0, 5.0), (2, 1, 3.0), (3, 1, 3.0)], [{"signal": 1}, {"signal": 0, "evt": 3}])
-    s, _ = score(ev, [0, 0, 1, 2], **SEL)
-    assert s["sel_C"] == pytest.approx(13 / 16) and s["sel_F"] == pytest.approx((10 * 1 + 6 * 2) / 16)
-    assert s["sel_P"] == pytest.approx(1) and s["sel_pileup_inside_frac"] == pytest.approx(6 / 16)
-    # the signal-only diagnostics still see the signal alone
-    assert s["sig_C"] == pytest.approx(1) and s["sig_F"] == pytest.approx(1) and s["sig_P"] == pytest.approx(1)
-
-
-def test_selected_trackster_energy_decomposes(mk):
-    # main 10 GeV + another selected 6 GeV + soft 2 GeV + 2 GeV no-truth, all in one trackster
-    ev = mk(4, [(0, 0, 10.0), (1, 1, 6.0), (2, 2, 2.0)], [{}, {}, {}], no_truth=[0, 0, 0, 2.0])
-    s, _ = score(ev, [0, 0, 0, 0], **SEL)
-    parts = (s["sel_P"], s["selts_other_sel_frac"], s["selts_soft_frac"], s["selts_notruth_frac"])
-    assert parts == pytest.approx((10 / 20, 6 / 20, 2 / 20, 2 / 20)) and sum(parts) == pytest.approx(1)
-
-
-# ---- objectives: signal truth groups against the ideal clustering of whole layer clusters ----
-
-SIG, PU = {"signal": 1}, {"signal": 0, "evt": 3}
-
-
-def objectives(ev, labels, **cfg):
-    cfg.setdefault("select_energy", 0.0)
-    cfg.setdefault("objective_energy", 0.0)
-    return score(ev, labels, **cfg)
-
-
-def test_ideal_clustering_scores_one(mk):
-    # signal 10 GeV over clusters 0-1, pileup 3 GeV in cluster 1 (signal leads it: unavoidable) and alone in cluster 2
-    ev = mk(3, [(0, 0, 6.0), (1, 0, 4.0), (1, 1, 1.0), (2, 1, 2.0)], [SIG, PU])
-    s, d = objectives(ev, [0, 0, 1])
-    assert s["C"] == pytest.approx(1) and s["P"] == pytest.approx(1)
-    assert s["obj_unavoidable_frac"] == pytest.approx(1 / 11)   # the pileup under the signal costs nothing
-    assert s["obj_ideal_purity"] == pytest.approx(10 / 11)
-    assert s["sel_P"] == pytest.approx(12 / 13)   # the previous purity charged the unavoidable 1 GeV
-
-
-def test_only_signal_targets_are_scored(mk):
-    # a pileup shower split in two does not change the objectives
-    ev = mk(4, [(0, 0, 5.0), (1, 0, 5.0), (2, 1, 3.0), (3, 1, 3.0)], [SIG, PU])
-    s, d = objectives(ev, [0, 0, 1, 2])
-    assert d["sums"]["obj_n"] == 1 and s["C"] == pytest.approx(1) and s["P"] == pytest.approx(1)
-    assert s["sel_C"] < 1   # the previous objective sees the split pileup
-
-
-def test_target_must_be_mostly_signal(mk):
-    # an inseparable 0.5 GeV signal particle inside a 9 GeV pileup shower: a pileup target, not scored
-    ev = mk(2, [(0, 1, 6.0), (0, 0, 0.5), (1, 1, 3.0)], [SIG, PU])
-    s, d = objectives(ev, [0, 0])
-    assert d["sums"]["obj_n"] == 0 and np.isnan(s["C"])
-    assert s["signal_in_pileup_targets_frac"] == pytest.approx(1)
-
-
-def test_separable_pileup_taken_in_costs_purity(mk):
-    # pileup 2 GeV alone in cluster 2: putting it in the signal trackster is avoidable
-    ev = mk(3, [(0, 0, 6.0), (1, 0, 4.0), (2, 1, 2.0)], [SIG, PU])
-    s, d = objectives(ev, [0, 0, 0])
-    assert s["C"] == pytest.approx(1) and s["P"] == pytest.approx(1 - 2 / 12)
-
-
-def test_no_truth_cluster_taken_in_costs_purity_but_no_truth_under_the_signal_does_not(mk):
-    ev = mk(3, [(0, 0, 6.0), (1, 0, 4.0)], [SIG], no_truth=[1.0, 0, 3.0])
-    s, d = objectives(ev, [0, 0, 1])          # cluster 0 holds 1 GeV noise, under the signal: free
-    assert s["P"] == pytest.approx(1)
-    s2, _ = objectives(ev, [0, 0, 0])         # the noise-only cluster 2 taken in: avoidable
-    assert s2["P"] == pytest.approx(1 - 3 / 14)
-
-
-def test_splitting_into_clean_pieces_keeps_completeness(mk):
-    # two pieces of one signal target: both are its pieces, completeness counts both; F reports the split
-    ev = mk(2, [(0, 0, 4.0), (1, 0, 4.0)], [SIG])
-    s, d = objectives(ev, [0, 1])
-    assert s["C"] == pytest.approx(1) and s["P"] == pytest.approx(1)
-    assert s["F"] == pytest.approx(2) and s["obj_tracksters_per_group"] == 2
-    assert s["sel_C"] == pytest.approx(0.5)   # the previous objective took the best trackster only
-
-
-def test_inaccurate_merge_costs_purity_and_completeness(mk):
-    # signal B (6 GeV over clusters 2-4): one trackster takes all of A and only cluster 2 of B (2 of 6 GeV);
-    # B's other 4 GeV are a trackster of their own. The first does not claim B: B's 2 GeV in it are contamination.
-    A, B = 0, 1
-    ev = mk(5, [(0, A, 5.0), (1, A, 5.0), (2, B, 2.0), (3, B, 2.0), (4, B, 2.0)], [SIG, SIG])
-    s, d = objectives(ev, [0, 0, 0, 1, 1])
-    assert d["sums"]["obj_groups"] == 2 and s["obj_merged_group_frac"] == 0
-    assert s["P"] == pytest.approx(1 - 2 / 16)
-    assert s["C"] == pytest.approx(14 / 16)   # B's 2 GeV in A's trackster are not collected for B
-
-
-def test_merged_chain_is_one_group(mk):
-    # an electron and its brem photon on one axis: the photon leads the late clusters. A trackster holding both
-    # is one group; splitting them at the hand-over is also fine, as two groups.
-    e, g = 0, 1
-    ev = mk(4, [(0, e, 6.0), (1, e, 4.0), (1, g, 1.0), (2, e, 1.0), (2, g, 4.0), (3, g, 3.0)], [SIG, SIG])
-    s, d = objectives(ev, [0, 0, 0, 0])
-    assert s["C"] == pytest.approx(1) and s["P"] == pytest.approx(1) and d["sums"]["obj_groups"] == 1
-    s2, d2 = objectives(ev, [0, 0, 1, 1])
-    assert d2["sums"]["obj_groups"] == 2 and s2["C"] == pytest.approx(1) and s2["P"] == pytest.approx(1)
-
-
-def test_pileup_never_joins_a_group(mk):
-    # separable pileup taken in whole is still contamination, however accurately it is taken
-    ev = mk(3, [(0, 0, 6.0), (1, 0, 4.0), (2, 1, 5.0)], [SIG, PU])
-    s, d = objectives(ev, [0, 0, 0])
-    assert s["P"] == pytest.approx(1 - 5 / 15) and d["sums"]["obj_groups"] == 1
-
-
-def test_energy_outside_the_ideal_cluster_is_not_credited(mk):
-    # the signal leads cluster 0; cluster 1 is led by pileup (2 vs 1 GeV of signal)
-    ev = mk(2, [(0, 0, 8.0), (1, 0, 1.0), (1, 1, 2.0)], [SIG, PU])
-    s, d = objectives(ev, [0, 0])
-    assert s["obj_ideal_completeness"] == pytest.approx(8 / 9)
-    assert s["C"] == pytest.approx(1)                       # all of what an ideal clustering could collect
-    assert s["P"] == pytest.approx(1 - 2 / 11)               # the pileup-led cluster brought in 2 GeV of pileup
-    assert s["obj_own_outside_frac"] == pytest.approx(1 / 11)
-
-
-def test_unclustered_ideal_energy_costs_completeness(mk):
-    ev = mk(3, [(0, 0, 6.0), (1, 0, 3.0), (2, 0, 1.0)], [SIG])
-    s, _ = objectives(ev, [0, 0, -1])
-    assert s["C"] == pytest.approx(0.9) and s["P"] == pytest.approx(1)
-
-
-def test_shared_layer_cluster_weights(mk):
-    # a layer cluster shared by two tracksters (multiplicity 2) counts half in each
-    ev = mk(2, [(0, 0, 4.0), (1, 0, 4.0)], [SIG])
-    ts = Tracksters(np.zeros(2), np.array([0, 2, 3]), np.array([0, 1, 1]), np.array([1.0, 0.5, 0.5]))
-    d = metrics.evaluate(ev, ts, truth.build(ev), metrics.MetricConfig(select_energy=0.0), keep_details=True)
-    s = metrics.summary(d["sums"])
-    assert s["C"] == pytest.approx(1) and s["P"] == pytest.approx(1)
-
-
-def test_objective_selection_energy(mk):
-    # a 4 GeV signal target in a trackster of its own is below 5 GeV: not scored, reported as unscored signal
-    ev = mk(2, [(0, 0, 10.0), (1, 1, 4.0)], [SIG, SIG])
-    s, d = score(ev, [0, 1], objective_energy=5.0)
-    assert d["sums"]["obj_n"] == 1 and s["signal_unscored_frac"] == pytest.approx(4 / 14)
-    s2, d2 = score(ev, [0, 0], objective_energy=5.0)   # taken whole into the 10 GeV one, which it does not touch:
-    assert s2["P"] == pytest.approx(1 - 4 / 14) and s2["signal_unscored_frac"] == pytest.approx(4 / 14)  # contamination
-
-
-def test_targets_apart_are_not_joined_even_if_held_whole(mk):
-    # two signal showers sharing no layer cluster, both whole in one trackster: not one object; the smaller is
-    # contamination of the larger (and has no trackster of its own)
-    ev = mk(4, [(0, 0, 5.0), (1, 0, 5.0), (2, 1, 3.0), (3, 1, 3.0)], [SIG, SIG])
-    s, d = objectives(ev, [0, 0, 0, 0])
-    assert d["sums"]["obj_groups"] == 2 and s["obj_merged_group_frac"] == 0
-    assert s["P"] == pytest.approx(1 - 6 / 16) and s["C"] == pytest.approx(10 / 16)
-
-
-def test_grazing_targets_held_whole_are_not_joined(mk):
-    # two showers sharing cluster 2, where the smaller one (B, 6 GeV) has only 2 GeV: they graze, they do not
-    # overlap. A trackster holding both whole does not join them: B is contamination of A
-    ev = mk(4, [(0, 0, 5.0), (1, 0, 4.0), (2, 0, 1.0), (2, 1, 2.0), (3, 1, 4.0)], [SIG, SIG])
-    s, d = objectives(ev, [0, 0, 0, 0])
-    assert d["sums"]["obj_groups"] == 2 and s["obj_merged_group_frac"] == 0
-    assert s["P"] == pytest.approx(1 - 6 / 16)
-
-
-def test_overlapping_targets_held_whole_are_one_group(mk):
-    # B (4 GeV) has 3 GeV in cluster 1, which A shares: 75% of the smaller one in shared clusters
-    ev = mk(3, [(0, 0, 6.0), (1, 0, 2.0), (1, 1, 3.0), (2, 1, 1.0)], [SIG, SIG])
-    assert truth.build(ev).n == 2       # the separability test keeps them apart
-    s, d = objectives(ev, [0, 0, 0])
-    assert d["sums"]["obj_groups"] == 1 and s["C"] == pytest.approx(1) and s["P"] == pytest.approx(1)
-
-
-def test_targets_overlapping_through_a_third_are_one_group(mk):
-    # A and C share nothing, but B overlaps A (3 of its 4 GeV in A's cluster 1) and C overlaps B (2 of its 2.5 GeV
-    # in cluster 2): a trackster holding all three joins them
-    A, B, C = 0, 1, 2
-    ev = mk(4, [(0, A, 6.0), (1, A, 2.0), (1, B, 3.0), (2, B, 1.0), (2, C, 2.0), (3, C, 0.5)], [SIG, SIG, SIG])
-    assert truth.build(ev).n == 3
-    s, d = objectives(ev, [0, 0, 0, 0])
-    assert d["sums"]["obj_groups"] == 1 and s["C"] == pytest.approx(1) and s["P"] == pytest.approx(1)
-
+    lab = np.array([0, 1, 1])
+    W_lc = metrics.objects(ev, lab, "lc")
+    W = sp.csr_matrix(np.array([[1, 0.7, 0, 0], [0, 0.3, 1, 1]]))
+    a, b = metrics.evaluate(ev, W_lc, t), metrics.evaluate(ev, W, t)
+    assert all(np.allclose(a[k], b[k]) for k in metrics.KEYS)
+    # with whole rechits, a layer-cluster clustering equals the rechit clustering it implies
+    ev2 = mk(4, [(0, 0, 2.0), (1, 0, 1.0), (2, 1, 2.0), (3, 1, 1.0)],
+             lcs=[[(0, 1.0), (1, 1.0)], [(2, 1.0)], [(3, 1.0)]])
+    a, b = run(ev2, [0, 1, -1], "lc"), run(ev2, [0, 0, 1, -1], "rh")
+    assert same(a, b)
+
+
+def test_cmssw_tracksters_use_the_vertex_multiplicity(mk):
+    # layer cluster 1 shared by two tracksters (multiplicity 2): each takes half of it
+    ev = mk(3, [(0, 0, 2.0), (1, 0, 1.0), (1, 1, 1.0), (2, 1, 2.0)])
+    ts = Tracksters(np.array([0, 2, 4]), np.array([0, 1, 1, 2]), np.array([1, 0.5, 0.5, 1]))
+    W = metrics.objects_from_tracksters(ev, ts)
+    assert W.toarray() == pytest.approx(np.array([[1, 0.5, 0], [0, 0.5, 1]]))
+    s = metrics.summary(metrics.evaluate(ev, W, truth.build(ev)))
+    assert s["K_sig"] == pytest.approx(0.5 / 3) and s["eps_sig"] == pytest.approx(2.5 / 3)
+
+
+def test_accounting_identity(mk):
+    rng = np.random.default_rng(1)
+    for _ in range(20):
+        ev, lab = random_event(mk, rng)
+        s = metrics.evaluate(ev, metrics.objects(ev, lab, "rh"), truth.build(ev))
+        assert np.allclose(s["e_num"] + s["lost_other"] + s["lost_none"], s["e_den"])
+
+
+def random_event(mk, rng, n_rh=30, n_un=6):
+    units = [dict(signal=int(rng.random() < 0.6), evt=int(rng.integers(0, 3)), pdg=int(rng.choice([22, 211])))
+             for _ in range(n_un)]
+    for u in units:
+        u["evt"] = 0 if u["signal"] else u["evt"] + 1
+    truth_ = [(int(c), int(u), float(rng.uniform(0.1, 3))) for c in range(n_rh)
+              for u in rng.choice(n_un, size=rng.integers(1, 4), replace=False)]
+    ev = mk(n_rh, truth_, units=units, no_truth=rng.uniform(0, 0.3, n_rh))
+    return ev, rng.integers(-1, 6, n_rh)
+
+
+def test_splitting_never_lowers_collection_nor_raises_contamination(mk):
+    # why the fragmentation metric is needed: metrics 1 and 2 alone reward shattering
+    rng = np.random.default_rng(2)
+    for _ in range(30):
+        ev, lab = random_event(mk, rng)
+        t = truth.build(ev)
+        W = metrics.objects(ev, lab, "rh")
+        best, own, _ = metrics.assign(W, t)
+        k = int(rng.integers(0, lab.max() + 1))
+        split = lab.copy()
+        members = np.nonzero(lab == k)[0]
+        split[members[: len(members) // 2]] = lab.max() + 1
+        best2, own2, _ = metrics.assign(metrics.objects(ev, split, "rh"), t)
+        E1 = metrics.objects(ev, lab, "rh") @ ev.rh["E"]
+        E2 = metrics.objects(ev, split, "rh") @ ev.rh["E"]
+        assert own2.sum() >= own.sum() - 1e-9                                           # credit never drops
+        assert (E2 - own2)[best2 >= 0].sum() <= (E1 - own)[best >= 0].sum() + 1e-9     # contamination never rises
+        assert (best2 >= 0).sum() >= (best >= 0).sum()                                  # objects never fewer
+
+
+def test_metrics_are_in_the_unit_interval(mk):
+    rng = np.random.default_rng(3)
+    for _ in range(30):
+        ev, lab = random_event(mk, rng)
+        s = run(ev, lab)
+        for k in ("K_sig", "eps_sig", "Phi_sig"):
+            assert 0 <= s[k] <= 1
+
+
+def test_sums_are_additive_over_events(mk):
+    rng = np.random.default_rng(4)
+    evs = [random_event(mk, rng) for _ in range(5)]
+    sums = [metrics.evaluate(ev, metrics.objects(ev, lab, "rh"), truth.build(ev)) for ev, lab in evs]
+    whole = metrics.summary(metrics.combine(sums))
+    parts = metrics.summary(metrics.combine([metrics.combine(sums[:2]), metrics.combine(sums[2:])]))
+    assert same(whole, parts) and whole["events"] == 5
+
+
+def test_samples_are_averaged_with_equal_weight():
+    a = dict(K_sig=0.2, eps_sig=0.6, Phi_sig=0.1, events=10)
+    b = dict(K_sig=0.4, eps_sig=0.8, Phi_sig=0.3, events=100)
+    m = metrics.mean_over_samples([a, b])
+    assert m == pytest.approx(dict(K_sig=0.3, eps_sig=0.7, Phi_sig=0.2, events=110))

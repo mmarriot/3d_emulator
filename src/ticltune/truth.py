@@ -1,22 +1,21 @@
-"""Truth targets for trackster building: which calorimeter-boundary particles could an ideal clustering
-reconstruct on their own?
+"""The truth of tuning/V3_TRUTH_AND_METRICS.md (section 4): atoms -> units -> targets, on rechits.
 
-Base particles (from the ntuple) are the calorimeter-boundary particles of the signal and of every in-time
-pileup interaction: what the truth graph says arrived at the calorimeter. Each owns the sim energy of everything
-it produced inside, rechit weighted per input cell: s(c, b). The cells are the layer clusters (what trackster
-building receives, `level="lc"`) or the rechits (`level="rh"`, what the whole chain starts from). Only cells the
-trackster-building step may use count (`Event.eligible`); energy elsewhere is reported as unreachable.
+Atoms are the truth-graph particles with energy in HGCAL rechits (inside the calorimeter included); s(c, a), their
+energy in rechit c, is in the ntuple. Each atom belongs to a unit (the ntuplizer's rule: the nearest
+reconstructableFinalState ancestor, the decay daughter below a pi0, else the root), the coarsest object downstream wants
+as one object.
 
-Ideal-clustering test. The ideal clustering of a set of objects gives every cell, whole, to the object with the
-most energy in it. Object t passes if its ideal cluster K_t holds more than `frac` of its energy (completeness)
-and more than `frac` of the truth energy in K_t is its own (purity): the metrics' "individual" outcome
-(`metrics.MetricConfig.individual_frac`), for the best clustering any algorithm could make of these cells.
+Targets: the units, merged by the ideal-clustering test on ALL HGCAL rechits (the same targets for rechit-level and
+layer-cluster-level clustering). The ideal clustering of a set of objects gives every rechit, whole, to the object
+with the most energy in it. An object passes if its ideal cluster holds more than `frac` of its energy
+(completeness) and more than `frac` of the energy in that cluster is its own (purity). A failing object is merged
+with the object of the SAME interaction it is most confused with (its energy in the other's ideal cluster plus the
+other's in its own) and the test is repeated until every object passes; a failing object with no same-interaction
+partner stays a target of its own, flagged unreachable. Never merging across interactions keeps unresolvable pileup
+inside signal objects a contamination, and stops collecting pileup from counting as efficiency.
 
-An object that fails cannot be reconstructed on its own by any algorithm working on these cells, so it is merged
-with the object it is most confused with: the o maximising s_t(K_o) + s_o(K_t) (its energy in o's ideal cluster
-plus o's in its own). Merging changes the ideal clustering, so the test is repeated on the merged objects until
-every object passes. The targets are the final objects: no geometry, no thresholds on distance or overlap, and
-no energy threshold (which targets the objectives score is decided afterwards, `MetricConfig.select_energy`).
+Also here: the ideal clusterings at both levels (the reference values of the metrics) and the natural pieces of each
+target (the same test on its atoms, a failing piece joining the piece of its parent atom).
 """
 from dataclasses import dataclass
 
@@ -24,45 +23,35 @@ import numpy as np
 import scipy.sparse as sp
 from scipy.sparse.csgraph import connected_components
 
-DEFAULT_FRAC = 0.5  # as metrics.MetricConfig.individual_frac: strictly more than half, both ways
+from .data import EM_PDG
+
+DEFAULT_FRAC = 0.5  # strictly more than half, both ways
 
 
 @dataclass
 class Targets:
-    level: str                   # "lc" or "rh": the cells the test was run on
     frac: float
     n: int
-    member_of: np.ndarray        # base-particle row -> target index (-1: no reachable energy)
-    T: sp.csr_matrix             # (n_lc, n) energy of each target in each layer cluster (eligible only): what metrics use
-    Tc: sp.csr_matrix            # (n_cells, n) the same in the cells of the test
-    S: sp.csr_matrix             # (n_cells, n_bp) base-particle energies in the cells of the test (eligible only)
-    E: np.ndarray                # reachable energy per target
-    completeness: np.ndarray     # of each target's ideal cluster (> frac by construction)
+    unit_target: np.ndarray    # unit row -> target
+    T: sp.csr_matrix           # (n_rh, n) energy of every target in every rechit
+    E: np.ndarray              # deposited energy of every target (all HGCAL rechits)
+    signal: np.ndarray         # bool: from the hard-scatter interaction
+    em: np.ndarray             # bool: class EM (the unit with the most energy is e, gamma or a pi0 daughter), else HAD
+    unreachable: np.ndarray    # bool: failed the test with no same-interaction partner
+    n_units: np.ndarray
+    completeness: np.ndarray   # of the final ideal clustering (> frac unless unreachable)
     purity: np.ndarray
-    E_unreachable: np.ndarray    # energy in cells the step may not use, per target
-    E_signal: np.ndarray
-    E_pileup: np.ndarray
-    is_signal: np.ndarray        # holds a signal base particle
-    n_members: np.ndarray
-    n_interactions: np.ndarray
-    n_origins: np.ndarray
-    origin_pdg: np.ndarray       # the origin's pdg id if the target has a single origin, else 0
-    merged_at: np.ndarray        # per base particle: iteration at which its object first failed (-1: never)
-    fail_completeness: np.ndarray  # ... that object's completeness and purity then
-    fail_purity: np.ndarray
-    partner: np.ndarray          # ... and the hardest base particle of the object it was merged with (-1: never)
-    n_iterations: int = 0
-    E_untargeted: float = 0.0    # energy of base particles with no reachable energy
-
-    def describe(self, t):
-        return (f"target {t}: E={self.E[t]:.3f} GeV ({'signal' if self.is_signal[t] else 'pileup'}), "
-                f"{self.n_members[t]} particles, {self.n_interactions[t]} interaction(s), {self.n_origins[t]} origin(s)")
+    merged_at: np.ndarray      # per unit: iteration at which its object first failed and merged (-1: never)
+    partner: np.ndarray        # per unit: the hardest unit of the object it merged with (-1: never)
+    n_iterations: int
+    no_truth: np.ndarray       # (n_rh,) rechit energy with no in-time sim energy
+    n_pieces: np.ndarray       # natural pieces per target (diagnostic)
 
 
 def ideal(Tc):
     """Ideal clustering of objects with cell energies Tc (n_cells, n_obj): every cell to its largest object.
-    Returns (dominant object per cell, -1 if no truth energy; completeness; purity; K) with
-    K[o, t] = energy of object t in the ideal cluster of object o."""
+    Returns (dominant object per cell, -1 if none; completeness; purity; K) with K[o, t] = energy of object t in the
+    ideal cluster of object o."""
     Tc = Tc.tocsr()
     n_obj = Tc.shape[1]
     top = Tc.max(axis=1).toarray().ravel()
@@ -79,103 +68,129 @@ def ideal(Tc):
     return dom, comp, pur, K
 
 
-def separate(S, frac=DEFAULT_FRAC, max_iterations=1000):
-    """Target label per column of S (n_cells, n_bp; columns with no energy must be removed beforehand) and the
-    merge record, by the ideal-clustering test (module docstring)."""
-    n_bp = S.shape[1]
-    E_bp = np.asarray(S.sum(axis=0)).ravel()
-    label = np.arange(n_bp)
-    merged_at = np.full(n_bp, -1, np.int64)
-    fail_c, fail_p = np.full(n_bp, np.nan), np.full(n_bp, np.nan)
-    partner = np.full(n_bp, -1, np.int64)
+def _heads(lab, n, E_base):
+    """The hardest base column of every object."""
+    o = np.lexsort((-E_base, lab))
+    first = o[np.r_[True, np.diff(lab[o]) != 0]] if len(o) else o
+    head = np.full(n, -1, np.int64)
+    head[lab[first]] = first
+    return head
+
+
+def separate(S, group, frac=DEFAULT_FRAC, partner_of=None, max_iterations=100000):
+    """Merge the columns of S (n_cells, n_base) by the ideal-clustering test.
+
+    group: per base column; merges only within a group (the interaction; for natural pieces, the target).
+    partner_of: optional per base column, a preferred partner column (natural pieces: the parent atom), used for a
+    failing object whose hardest column has one in another object of the same group; otherwise the partner is the
+    object of the same group it is most confused with. A failing object with no partner is flagged unreachable and
+    not retested (the flag is lost if another object merges into it).
+    Returns (label per column, completeness, purity, unreachable per object, merged_at, partner, iterations)."""
+    n_base = S.shape[1]
+    E_base = np.asarray(S.sum(axis=0)).ravel()
+    group = np.asarray(group)
+    label = np.arange(n_base)
+    flagged = np.zeros(n_base, bool)  # indexed by label value
+    merged_at = np.full(n_base, -1, np.int64)
+    partner = np.full(n_base, -1, np.int64)
+    S = S.tocsc()
     for it in range(max_iterations):
         uniq, lab = np.unique(label, return_inverse=True)
         n = len(uniq)
-        G = sp.csr_matrix((np.ones(n_bp), (np.arange(n_bp), lab)), shape=(n_bp, n))
+        flag = flagged[uniq]
+        G = sp.csr_matrix((np.ones(n_base), (np.arange(n_base), lab)), shape=(n_base, n))
         _, comp, pur, K = ideal(S @ G)
-        fail = np.nonzero((comp <= frac) | (pur <= frac))[0]
+        grp = np.zeros(n, group.dtype)
+        grp[lab] = group
+        fail = np.nonzero(((comp <= frac) | (pur <= frac)) & ~flag)[0]
         if len(fail) == 0:
-            return lab, comp, pur, merged_at, fail_c, fail_p, partner, it
-        C = K + K.T  # confusion of every pair of objects
-        C = (C - sp.diags(C.diagonal())).tocsr()[fail]
-        part = np.asarray(C.argmax(axis=1)).ravel()
-        assert (C.max(axis=1).toarray().ravel() > 0).all()  # a failing object always shares energy with another
-        o = np.lexsort((-E_bp, lab))  # hardest base particle of each object, to name the partner
-        head = o[np.r_[True, np.diff(lab[o]) != 0]]
-        hardest = np.empty(n, np.int64)
-        hardest[lab[head]] = head
-        first = np.isin(lab, fail) & (merged_at < 0)
-        fpos = np.searchsorted(fail, lab[first])
+            return lab, comp, pur, flag, merged_at, partner, it
+        C = (K + K.T).tocsr()[fail].tocoo()
+        ok = (grp[C.col] == grp[fail[C.row]]) & (C.col != fail[C.row]) & (C.data > 0)
+        best = np.full(len(fail), -1, np.int64)
+        if ok.any():
+            r, c, v = C.row[ok], C.col[ok], C.data[ok]
+            order = np.lexsort((c, -v, r))  # the largest confusion, then the lower index
+            first = np.unique(r[order], return_index=True)[1]
+            best[r[order][first]] = c[order][first]
+        head = _heads(lab, n, E_base)
+        if partner_of is not None:
+            pref = partner_of[head[fail]]
+            pobj = np.where(pref >= 0, lab[np.maximum(pref, 0)], -1)
+            use = (pobj >= 0) & (pobj != fail)
+            use[use] &= grp[pobj[use]] == grp[fail[use]]
+            best = np.where(use, pobj, best)
+        lone = best < 0
+        if lone.all():  # only new unreachable objects
+            flagged[uniq[fail]] = True
+            continue
+        f_obj, p_obj = fail[~lone], best[~lone]
+        where = np.full(n, -1, np.int64)
+        where[f_obj] = np.arange(len(f_obj))
+        first = (where[lab] >= 0) & (merged_at < 0)
         merged_at[first] = it
-        fail_c[first], fail_p[first] = comp[lab[first]], pur[lab[first]]
-        partner[first] = hardest[part[fpos]]
-        A = sp.csr_matrix((np.ones(len(fail)), (fail, part)), shape=(n, n))
-        _, cc = connected_components(A, directed=False)
+        partner[first] = head[p_obj[where[lab[first]]]]
+        _, cc = connected_components(sp.csr_matrix((np.ones(len(f_obj)), (f_obj, p_obj)), shape=(n, n)), directed=False)
+        keep = flag.copy()
+        keep[fail[lone]] = True
+        alone = np.bincount(cc)[cc] == 1  # objects not merged keep (or get) their flag
         label = cc[lab]
+        flagged = np.zeros(n_base, bool)
+        flagged[cc[alone]] = keep[alone]
     raise RuntimeError("ideal-clustering test did not converge")
 
 
-def _per_target_unique(inv, values, n):
-    """Number of distinct values per target, and the value where there is only one."""
-    pairs_ = np.unique(np.stack([inv, values]), axis=1)
-    count = np.bincount(pairs_[0], minlength=n)
-    single = np.zeros(n, np.int64)
-    single[pairs_[0]] = pairs_[1]
-    return count, np.where(count == 1, single, 0)
+def unit_cells(ev):
+    """(n_rh, n_units) energy of every unit in every rechit."""
+    tra = ev.tra
+    return sp.csr_matrix((tra["E"], (tra["rh"], ev.at["unit"][tra["at"]])), shape=(ev.n_rh, len(ev.un["id"])))
 
 
-def cells(ev, level):
-    """(full, eligible) base-particle energies in the cells of a level: (n_cells, n_bp) CSR matrices."""
-    if level == "lc":
-        full = sp.csr_matrix((ev.tr_E, (ev.tr_lc, ev.tr_bp)), shape=(ev.n_lc, ev.n_bp))
-        elig = ev.eligible()
-    elif level == "rh":
-        if ev.rh is None:
-            raise ValueError("this ntuple has no rechit truth table (rh_*, trh_*)")
-        full = sp.csr_matrix((ev.trh_E, (ev.trh_rh, ev.trh_bp)), shape=(len(ev.rh["E"]), ev.n_bp))
-        elig = ev.rh_eligible()
-    else:
-        raise ValueError(f"level must be 'lc' or 'rh', not {level!r}")
-    S = (sp.diags(elig.astype(float)) @ full).tocsr()
-    S.eliminate_zeros()
-    return full, S
-
-
-def build(ev, level="lc", frac=DEFAULT_FRAC):
-    """Targets of one event (cached per setting)."""
-    key = ("targets", level, frac)
+def build(ev, frac=DEFAULT_FRAC, pieces=True):
+    """Targets of an event (cached on the event)."""
+    key = ("targets", frac, pieces)
     if key in ev._cache:
         return ev._cache[key]
-    full, S = cells(ev, level)
-    Eb = np.asarray(S.sum(axis=0)).ravel()
-    Eb_un = np.asarray(full.sum(axis=0)).ravel() - Eb
-    reach = np.nonzero(Eb > 0)[0]
-    lab, comp, pur, m_at, f_c, f_p, part, n_it = separate(S[:, reach], frac)
+    un = ev.un
+    S = unit_cells(ev)
+    inter = un["bx"].astype(np.int64) * 1_000_000 + un["evt"].astype(np.int64)
+    lab, comp, pur, flag, merged_at, partner, it = separate(S, inter, frac)
     n = int(lab.max()) + 1 if len(lab) else 0
-    member_of = np.full(ev.n_bp, -1, np.int64)
-    member_of[reach] = lab
-    merged_at = np.full(ev.n_bp, -1, np.int64)
-    merged_at[reach] = m_at
-    fail_c, fail_p = np.full(ev.n_bp, np.nan), np.full(ev.n_bp, np.nan)
-    fail_c[reach], fail_p[reach] = f_c, f_p
-    partner = np.full(ev.n_bp, -1, np.int64)
-    partner[reach] = np.where(part >= 0, reach[np.maximum(part, 0)], -1)
-    G = sp.csr_matrix((np.ones(len(reach)), (reach, lab)), shape=(ev.n_bp, n))
-    _, S_lc = cells(ev, "lc")
-    sig = ev.bp["signal"][reach].astype(bool)
-    E = np.bincount(lab, weights=Eb[reach], minlength=n)
-    E_sig = np.bincount(lab, weights=(Eb[reach] * sig), minlength=n)
-    is_sig = np.zeros(n, bool)
-    np.logical_or.at(is_sig, lab, sig)
-    inter = ev.bp["bx"].astype(np.int64) * 100000 + ev.bp["evt"].astype(np.int64)
-    n_int, _ = _per_target_unique(lab, inter[reach], n)
-    n_org, _ = _per_target_unique(lab, ev.bp["origin"][reach].astype(np.int64), n)
-    _, pdg1 = _per_target_unique(lab, ev.bp["originPdg"][reach].astype(np.int64), n)
-    out = Targets(level=level, frac=frac, n=n, member_of=member_of, T=(S_lc @ G).tocsr(), Tc=(S @ G).tocsr(), S=S,
-                  E=E, completeness=comp, purity=pur, E_unreachable=np.bincount(lab, weights=Eb_un[reach], minlength=n),
-                  E_signal=E_sig, E_pileup=E - E_sig, is_signal=is_sig, n_members=np.bincount(lab, minlength=n),
-                  n_interactions=n_int, n_origins=n_org, origin_pdg=np.where(n_org == 1, pdg1, 0),
-                  merged_at=merged_at, fail_completeness=fail_c, fail_purity=fail_p, partner=partner,
-                  n_iterations=n_it, E_untargeted=float(Eb_un[Eb <= 0].sum()))
-    ev._cache[key] = out
-    return out
+    G = sp.csr_matrix((np.ones(len(lab)), (np.arange(len(lab)), lab)), shape=(len(lab), n))
+    T = (S @ G).tocsr()
+    E = np.asarray(T.sum(axis=0)).ravel()
+    signal = np.zeros(n, bool)
+    signal[lab[un["signal"] > 0]] = True
+    lead = _heads(lab, n, np.asarray(S.sum(axis=0)).ravel())  # the unit with the most energy
+    em = np.isin(np.abs(un["pdg"][lead]), EM_PDG) | (un["kind"][lead] == 1)
+    t = Targets(frac=frac, n=n, unit_target=lab, T=T, E=E, signal=signal, em=em, unreachable=flag,
+                n_units=np.bincount(lab, minlength=n), completeness=comp, purity=pur, merged_at=merged_at,
+                partner=partner, n_iterations=it, no_truth=np.asarray(ev.rh["noTruthE"], float),
+                n_pieces=natural_pieces(ev, lab, frac) if pieces else np.ones(n, np.int64))
+    ev._cache[key] = t
+    return t
+
+
+def natural_pieces(ev, unit_target, frac=DEFAULT_FRAC):
+    """Number of natural pieces of every target: the ideal-clustering test on the target's atoms, on its own energy
+    only (cells = (rechit, target) pairs), a failing piece joining the piece of its parent atom (else the piece it is
+    most confused with)."""
+    tra, at = ev.tra, ev.at
+    tgt_of_atom = unit_target[at["unit"]]
+    n_t = int(unit_target.max()) + 1 if len(unit_target) else 0
+    cell = tra["rh"].astype(np.int64) * max(n_t, 1) + tgt_of_atom[tra["at"]]
+    uc, cell_idx = np.unique(cell, return_inverse=True)
+    A = sp.csr_matrix((tra["E"], (cell_idx, tra["at"])), shape=(len(uc), len(at["id"])))
+    parent = at["parent"].copy()
+    parent[(parent >= 0) & (tgt_of_atom[np.maximum(parent, 0)] != tgt_of_atom)] = -1
+    lab = separate(A, tgt_of_atom, frac, partner_of=parent)[0]
+    pieces = np.zeros(n_t, np.int64)
+    np.add.at(pieces, tgt_of_atom[np.unique(lab, return_index=True)[1]], 1)
+    return pieces
+
+
+def ideal_labels(ev, t, level):
+    """The ideal clustering at `level` as labels: every rechit ("rh") or every layer cluster ("lc", its truth from
+    its rechit fractions) to its dominant target; -1 if it holds no truth energy."""
+    Tc = t.T if level == "rh" else (ev.lc_to_rh() @ t.T).tocsr()
+    return ideal(Tc)[0]

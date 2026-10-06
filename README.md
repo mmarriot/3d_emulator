@@ -1,93 +1,69 @@
 # ticltune
 
-Truth-based metrics and a CLUEstering emulator for tuning TICL **trackster building**, entirely
-outside CMSSW. CMSSW is used once per sample, to write the ntuple (`TruthMetrics/Ntuple`).
+Truth, metrics and a CLUEstering emulator for tuning TICL **trackster building** outside CMSSW, on layer clusters or
+on rechits, scored identically at both levels. The definitions (and the reason for every choice) are in
+`../tuning/V3_TRUTH_AND_METRICS.md`; this package implements exactly that. CMSSW is used once per sample, to write the
+ntuple (`TruthMetrics/Ntuple`, `TracksterTruthNtuplizer`).
 
 ```
 src/ticltune/
-  data.py      events from the ntuple: layer clusters, truth table, base particles, CMSSW reference
-  clue.py      CLUEstering trackster building, emulated -> one label per layer cluster
-  truth.py     base particles -> targets: what an ideal clustering could reconstruct on its own
-  metrics.py   C, P, F and every diagnostic, as additive per-event sums
-  closure.py   emulator vs CMSSW, compared as partitions
-  truth_display.py  per-event JSON for the truth viewer (TruthMetrics/Display/viewer/truth_targets.html), no reco
-  cli.py       `python -m ticltune score|closure|truth-display ...`
-tests/         one toy event per property of the definitions (pytest)
+  data.py     events from the ntuple: every HGCAL rechit, layer clusters (+ rechit fractions), atoms, units, the
+              (rechit, atom, energy) truth table, CMSSW tracksters and CLUEstering assignment
+  clue.py     CLUEstering trackster building (the CMSSW algorithm), points = layer clusters or rechits
+  truth.py    atoms -> units -> targets: ideal-clustering test on rechits, never across interactions; ideal
+              clusterings at both levels; natural pieces
+  metrics.py  any clustering -> rechit fractions -> best target per object -> K_sig, eps_sig, Phi_sig (+ diagnostics),
+              as additive per-event sums
+  closure.py  emulator vs CMSSW, compared as partitions
+  cli.py      python -m ticltune score | truth | closure
+tests/        toy events, one per property of the definitions; test_acceptance.py on a real ntuple
 ```
 
-Setup: `cmsenv` in the CMSSW area (numpy, scipy, awkward, uproot, pytest are there), then
-`pip install -e .` or `PYTHONPATH=src`. Run the tests with `python3 -m pytest -q`.
+Setup: `cmsenv` in the CMSSW area (numpy, scipy, uproot, pytest are there), then `pip install -e .` or
+`PYTHONPATH=src`. Tests: `python3 -m pytest -q`; on a real ntuple:
+`TICLTUNE_NTUPLE=/path/job_000.root python3 -m pytest -q tests/test_acceptance.py`.
 
-## Truth
+## Truth (spec section 4)
 
-* **Base particles**: the `caloBoundary` particles (crossed into the calorimeter) of the signal and
-  of every in-time pileup interaction. Each calorimeter sim hit belongs to its particle's nearest
-  `caloBoundary` ancestor (fallbacks: `reconstructableFinalState`, then the root; `bp_kind`).
-* **Energy of a base particle in a layer cluster**, rechit weighted:
-  `s(l,b) = sum_c fraction_l(c) E_rechit(c) E_sim(b,c) / E_sim(in-time, c)`.
-  Rechit energy in cells with no in-time sim energy (out-of-time pileup, noise) is the layer
-  cluster's **no-truth** energy.
-* **Rechit level**: the same table per rechit (rechits of layer clusters), `E_rechit * E_sim(b, c) / E_sim(in-time, c)`.
-* **Reachable energy**: only layer clusters the step may use (HGCAL, iteration mask) count, and at rechit level the
-  rechits of those layer clusters. Energy elsewhere is reported as unreachable.
-* **Targets: the ideal-clustering test** (`truth.build(ev, level="lc"|"rh", frac=0.5)`). The ideal clustering gives
-  every cell (layer cluster or rechit), whole, to the object with the most energy in it. An object passes if its ideal
-  cluster holds more than `frac` of its energy (completeness) and more than `frac` of the truth energy in that cluster
-  is its own (purity): the metrics' "individual" outcome, for the best clustering any algorithm could make of these
-  cells. An object that fails cannot be reconstructed on its own by any algorithm working on these cells, so it is
-  merged with the object it is most mixed with (its energy in the other's ideal cluster plus the other's in its own),
-  and the test is repeated on the merged objects until every object passes. No geometry, no overlap threshold.
-  On layer clusters the targets are what trackster building can be asked for; on rechits, what the whole chain could
-  separate. A pair separable on rechits but not on layer clusters is merged by the layer clustering.
-* Targets have no energy threshold. A target is **selected** if its reachable energy
-  `E_t >= select_energy` (default 5 GeV), signal or pileup alike. The cut is on the target, after
-  linking, so a soft particle inseparable from a hard one is part of it (not penalised). Unselected
-  (soft) targets are noise: they never enter C or F and only lower the purity of tracksters they join.
-  `E_t` is reachable energy, so the selected set depends on the iteration mask.
-* A target is a **signal target** if it holds a signal particle; the signal-only objectives
-  (`sig_C`, `sig_P`, `sig_F`) are kept as diagnostics.
+* **Atoms**: the truth-graph particles with energy in HGCAL rechits, inside the calorimeter included. Energy of atom a
+  in rechit c: `s(c, a) = E_rechit(c) * E_sim(a, c) / E_sim(all in-time, c)`; rechit energy with no in-time sim energy
+  is no-truth energy (out-of-time pileup, noise).
+* **Units** (made by the ntuplizer): an atom's nearest `reconstructableFinalState` ancestor-or-self; below a pi0, the
+  pi0's decay daughter; else the root. The coarsest object downstream wants as one object.
+* **Targets** (`truth.build`): units merged by the ideal-clustering test on all HGCAL rechits (every rechit to the
+  object with the most energy in it; pass = completeness > 0.5 and purity > 0.5). A failing object merges with the
+  object of the same interaction it is most confused with; with none, it stays alone, flagged `unreachable`. Signal =
+  hard-scatter interaction; class EM if the leading unit is e, gamma or a pi0 daughter, else HAD.
+* **References** (`truth.ideal_labels`): the ideal clustering on rechits and on layer clusters.
+* **Natural pieces** (diagnostic): the same test on a target's atoms, a failing piece joining its parent atom's piece.
 
-## Metrics
+## Clustering (`clue.cluster(clue.points(ev, level), params)`)
 
-`e(t,k)` = energy of target t in trackster k; a trackster's energy is `E_k = sum_t e(t,k) + no-truth`.
+The CMSSW CLUEstering trackster building (`clue.Params`, defaults = `CLUE3DHighStep_cff`). Points: `level="lc"` the
+layer clusters passing the CLUE3DHigh mask (>= 2 hits in silicon); `level="lc_all"` every layer cluster, single-hit ones
+included (the same filter with `min_cluster_size = 1`); `level="rh"` every HGCAL rechit (tag = DetId). Emulator vs CMSSW on 30 PU200 events of the tuning
+sample: 99.995% of the layer clusters assigned identically, 29/30 events identical (the rest: 1-ulp density ties).
 
-**Tuning objectives: signal truth groups against the ideal clustering** (`metrics.ideal_scores`, layer clusters).
+## Metrics (spec section 6)
 
-* Signal targets: more than `signal_frac` (50%) of `E_t` from signal particles. The targets come from the test on the
-  whole event, pileup included: pileup that cannot be separated from the signal is in the signal target (no cost),
-  separable pileup is an object of its own.
-* Truth groups follow the clustering: a signal target and a trackster are linked if the trackster is a piece of the
-  target (it is the trackster's main target) or claims it (holds more than `claim_frac` = 50% of it). Connected sets are
-  the groups; a group's truth is the sum of its targets. A trackster only joins targets that overlap: of two
-  targets, more than `overlap_frac` (50%) of the smaller one's energy lies in layer clusters shared with the other,
-  directly or through other targets it joins (no distance scale: a brem photon showering along its electron overlaps
-  it, two showers grazing each other do not). Merging whole overlapping targets costs nothing, taking part of a
-  target or a target that does not overlap makes it contamination, splitting a group into several tracksters is allowed (the linking joins them), and
-  pileup never joins a group. Scored: groups holding a signal target with `E_t >= objective_energy` (2 GeV; the
-  `sel_*` diagnostics keep `select_energy` = 5 GeV).
-* Ideal clustering with every group summed: every layer cluster, whole, to its largest object; `K_g` = the layer
-  clusters of group g. Its other content (other objects, no-truth energy) is contamination no clustering of layer
-  clusters can avoid.
+Any clustering becomes rechit fractions `w_rc` (`metrics.objects`: labels at either level, or
+`objects_from_tracksters` for CMSSW collections, through the exact layer-cluster fractions). Each object goes to the
+target with the largest share (ties: larger deposited energy, then lower index); per class (EM, HAD), then averaged:
 
-| | definition |
-|---|---|
-| **C** | `sum_g sum_{k in g} sum_{l in K_g} w_kl T_g(l) / sum_g sum_{l in K_g} T_g(l)`: what the group's tracksters collect of what an ideal clustering could |
-| **P** | `1 - sum_k A_k / sum_k E_k` over the tracksters of scored groups, `A_k = sum_{l not in K_g} w_kl (E_l - T_g(l))`: what is not the group's, in layer clusters the ideal clustering gives to something else |
-| **F** | reported, not tuned: energy-weighted mean over scored groups of `1 / sum_k f_gk^2` over its tracksters |
+| metric | definition | best |
+|---|---|---|
+| `K_sig` | energy in signal objects that is not their target / their energy | 0 |
+| `eps_sig` | each signal target's energy in the objects assigned to it / its deposited energy (all rechits) | 1 |
+| `Phi_sig` | `1 - sum c_t / sum c_t N_t` (N_t = objects assigned to t, c_t = their energy of t): surplus fragments | 0 |
 
-The ideal clustering scores C = P = 1, and so does any merge of whole targets. Diagnostics: groups per event, share
-merged by the clustering, tracksters per group, groups with none, the ideal clustering's own completeness and purity,
-the free contamination in the tracksters, the signal energy in pileup targets and in unscored groups.
+`metrics.evaluate` returns additive sums (any split of the events gives the same `summary`); `metrics.summary` gives
+the metrics and the diagnostics (`K_pu`, `eps_pu`, cell floor of K, lost energy split, objects per event, every metric
+per class and energy bin); `metrics.mean_over_samples` averages samples with equal weight.
 
-The previous objectives (every selected target, signal or pileup, no ideal reference) are kept as `sel_C`, `sel_P`,
-`sel_F`, and the same for targets holding a signal particle as `sig_C`, `sig_P`, `sig_F`; all other diagnostics
-(`metrics.summary`) are as before: unclustered / unreachable fractions, pileup inside, individual / split / lost
-outcomes, merge and fake rates, N_mix.
+## Command line
 
-## Emulator
-
-`clue.cluster(event, Params(...))` reproduces `TrackstersCLUEsteringProducer` +
-`PatternRecognitionbyCLUEstering` (defaults = `CLUE3DHighStep_cff` under `ticl_dev`); float32 on by
-default; tie-breaks by the layer cluster's seed DetId as CLUEstering does. The research variants of
-the original `clue_emu.py` are kept as `Params` fields, all off by default.
-Validate with `python -m ticltune closure ntuple.root` before trusting a setting.
+```bash
+python3 -m ticltune score  FILES... [--level lc|lc_all|rh] [--settings s.json] [--cmssw ticlTrackstersCLUE3DHigh] [-o out.json]
+python3 -m ticltune truth  FILES...
+python3 -m ticltune closure FILES... [--collection ticlTrackstersCLUE3DHigh]
+```

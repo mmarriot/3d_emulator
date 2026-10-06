@@ -49,18 +49,18 @@ def compare(a, b, consider=None):
 
 
 def run(events, params=clue.DEFAULT, collection=None):
-    """Closure over events: the raw assignment (before the minimum-size cut) against
+    """Closure over events at layer-cluster level: the raw assignment (before the minimum-size cut) against
     clue_assignment, and, if `collection` is given, the final tracksters against it."""
     raw, final = [], []
     for ev in events:
-        elig = ev.eligible()
+        pts = clue.points(ev, "lc")
         if ev.clue_assignment is not None:
-            raw.append(compare(clue.cluster(ev, params, drop_small=False), ev.clue_assignment, elig))
+            raw.append(compare(clue.cluster(pts, params, drop_small=False), ev.clue_assignment, pts.active))
         if collection and collection in ev.cmssw:
             ts = ev.cmssw[collection]
             ref = np.full(ev.n_lc, -1, np.int64)
             ref[ts.lc] = ts.owner()
-            final.append(compare(clue.cluster(ev, params, drop_small=True), ref, elig))
+            final.append(compare(clue.cluster(pts, params, drop_small=True), ref, pts.active))
 
     def agg(rows):
         if not rows:
